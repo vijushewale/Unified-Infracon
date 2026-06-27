@@ -21,17 +21,29 @@ export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
 ) => {
+  // Try to load cached token from localStorage first
+  const storedToken = localStorage.getItem("google_access_token");
+  if (storedToken) {
+    cachedAccessToken = storedToken;
+  }
+
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
       if (cachedAccessToken) {
         if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
       } else {
-        // If we have a user but no cached token (e.g., page reload), we might need to re-authenticate or get token.
-        // In client-only flow, if token is not cached, we prompt login or keep state.
-        if (onAuthFailure) onAuthFailure();
+        // Fallback to checking localStorage again in case it was written elsewhere
+        const localToken = localStorage.getItem("google_access_token");
+        if (localToken) {
+          cachedAccessToken = localToken;
+          if (onAuthSuccess) onAuthSuccess(user, localToken);
+        } else {
+          if (onAuthFailure) onAuthFailure();
+        }
       }
     } else {
       cachedAccessToken = null;
+      localStorage.removeItem("google_access_token");
       if (onAuthFailure) onAuthFailure();
     }
   });
@@ -48,6 +60,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     }
 
     cachedAccessToken = credential.accessToken;
+    localStorage.setItem("google_access_token", cachedAccessToken);
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error("Sign in error:", error);
@@ -58,10 +71,11 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 };
 
 export const getAccessToken = (): string | null => {
-  return cachedAccessToken;
+  return cachedAccessToken || localStorage.getItem("google_access_token");
 };
 
 export const logout = async () => {
   await signOut(auth);
   cachedAccessToken = null;
+  localStorage.removeItem("google_access_token");
 };
