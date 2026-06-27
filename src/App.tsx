@@ -26,7 +26,15 @@ import {
   FileText, 
   Volume2, 
   AlertCircle,
-  ExternalLink
+  ExternalLink,
+  Users,
+  UserPlus,
+  Lock,
+  User as UserIcon,
+  Plus,
+  Edit2,
+  Save,
+  Send
 } from "lucide-react";
 import { 
   ResponsiveContainer, 
@@ -61,12 +69,46 @@ interface ParsedTransaction {
   detectedLanguage: string;
 }
 
+interface OfflineProfile {
+  id: string;
+  displayName: string;
+  username: string;
+  password?: string;
+  role: string;
+  avatarColor: string;
+}
+
 export default function App() {
-  // Auth State
-  const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
-  const [needsAuth, setNeedsAuth] = useState(true);
+  // Local/Offline Profile State
+  const [profiles, setProfiles] = useState<OfflineProfile[]>(() => {
+    const stored = localStorage.getItem("local_profiles_v4");
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch (e) {}
+    }
+    return [
+      { id: "1", displayName: "Ganesh Hinge", username: "ganesh", password: "123", role: "", avatarColor: "bg-indigo-600" },
+      { id: "2", displayName: "Avinash Choudhari", username: "avinash", password: "123", role: "", avatarColor: "bg-emerald-600" }
+    ];
+  });
+
+  const [activeProfile, setActiveProfile] = useState<OfflineProfile | null>(() => {
+    const stored = localStorage.getItem("active_profile");
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch (e) {}
+    }
+    return null;
+  });
+
+  // Auth State (Mocked to retain compatibility)
+  const [user] = useState<any>(null);
+  const [token] = useState<string | null>(null);
+  const needsAuth = !activeProfile;
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const isOfflineMode = true; // Always in local database mode now
 
   // Sheets Config State
   const [spreadsheetId, setSpreadsheetId] = useState<string | null>(() => localStorage.getItem("sheet_id"));
@@ -95,10 +137,31 @@ export default function App() {
   // Confirmation dialog details
   const [waitingForConfirmation, setWaitingForConfirmation] = useState(false);
 
+  // Voice Language selection & Auto-Submit preferences
+  const [voiceLang, setVoiceLang] = useState<string>(() => localStorage.getItem("voice_lang") || "mr-IN");
+  const [autoSubmit, setAutoSubmit] = useState<boolean>(() => {
+    const val = localStorage.getItem("auto_submit");
+    return val === null ? true : val === "true";
+  });
+
+  // Sync settings to localStorage
+  useEffect(() => {
+    localStorage.setItem("voice_lang", voiceLang);
+  }, [voiceLang]);
+
+  useEffect(() => {
+    localStorage.setItem("auto_submit", String(autoSubmit));
+  }, [autoSubmit]);
+
   // UI state
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [filterType, setFilterType] = useState<"All" | "Paid" | "Received">("All");
   const [searchQuery, setSearchQuery] = useState("");
+  const [ledgerViewMode, setLedgerViewMode] = useState<"list" | "spreadsheet">("spreadsheet");
+  const [editingCell, setEditingCell] = useState<{ createdTime: string; field: keyof TransactionEntry } | null>(null);
+  const [editingValue, setEditingValue] = useState<string>("");
+  const [deleteConfirmRow, setDeleteConfirmRow] = useState<string | null>(null);
+  const [showDeleteLastConfirm, setShowDeleteLastConfirm] = useState(false);
   const [showHelpModal, setShowHelpModal] = useState(false);
   const [successNotification, setSuccessNotification] = useState<string | null>(null);
   const [errorNotification, setErrorNotification] = useState<string | null>(null);
@@ -106,22 +169,32 @@ export default function App() {
   // Manual input when amount is missing
   const [manualAmount, setManualAmount] = useState<string>("");
 
-  // Initialize Auth state
+  // Credentials Login Form & Registration state
+  const [loginMode, setLoginMode] = useState<"select" | "direct" | "register">("select");
+  const [selectedProfileForPassword, setSelectedProfileForPassword] = useState<OfflineProfile | null>(null);
+  const [inlinePassword, setInlinePassword] = useState("");
+  const [usernameInput, setUsernameInput] = useState("");
+  const [passwordInput, setPasswordInput] = useState("");
+
+  const [newProfileName, setNewProfileName] = useState("");
+  const [newProfileUsername, setNewProfileUsername] = useState("");
+  const [newProfilePassword, setNewProfilePassword] = useState("");
+  const [newProfileRole, setNewProfileRole] = useState("Accounts Manager");
+  const [newProfileColor, setNewProfileColor] = useState("bg-indigo-600");
+
+  // Sync local profiles to localStorage
   useEffect(() => {
-    const unsubscribe = initAuth(
-      (currentUser, accessToken) => {
-        setUser(currentUser);
-        setToken(accessToken);
-        setNeedsAuth(false);
-      },
-      () => {
-        setUser(null);
-        setToken(null);
-        setNeedsAuth(true);
-      }
-    );
-    return () => unsubscribe();
-  }, []);
+    localStorage.setItem("local_profiles_v4", JSON.stringify(profiles));
+  }, [profiles]);
+
+  // Sync active local profile to localStorage
+  useEffect(() => {
+    if (activeProfile) {
+      localStorage.setItem("active_profile", JSON.stringify(activeProfile));
+    } else {
+      localStorage.removeItem("active_profile");
+    }
+  }, [activeProfile]);
 
   // Sync spreadsheetId and sheetUrl to localStorage
   useEffect(() => {
@@ -140,47 +213,104 @@ export default function App() {
     }
   }, [sheetUrl]);
 
-  // Synchronize authentication tokens and state across tabs/iframes instantly when localStorage changes
-  useEffect(() => {
-    const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === "google_access_token") {
-        const tokenVal = e.newValue;
-        if (tokenVal) {
-          // If a new token was saved on another tab (e.g. after a secure top-level popup login),
-          // reload the page to completely re-authenticate in this iframe without popup blocking!
-          window.location.reload();
-        } else {
-          // If token was cleared, reset authentication state
-          setUser(null);
-          setToken(null);
-          setNeedsAuth(true);
-        }
+  // Fetch entries from local storage if offline
+  const fetchSheetEntries = async () => {
+    const stored = localStorage.getItem("offline_entries");
+    if (stored) {
+      try {
+        setEntries(JSON.parse(stored));
+      } catch (e) {
+        setEntries([]);
       }
+    }
+  };
+
+  // Handle cell save from inline edit in spreadsheet view
+  const handleCellSave = (createdTime: string, field: keyof TransactionEntry, value: string) => {
+    const updatedEntries = entries.map(e => {
+      if (e.createdTime === createdTime) {
+        const updated = { ...e };
+        if (field === "amount") {
+          const num = parseFloat(value);
+          updated.amount = isNaN(num) ? 0 : num;
+        } else if (field === "rowNumber") {
+          const num = parseInt(value);
+          updated.rowNumber = isNaN(num) ? updated.rowNumber : num;
+        } else if (field === "type") {
+          updated.type = value === "Received" ? "Received" : "Paid";
+        } else {
+          (updated as any)[field] = value;
+        }
+        return updated;
+      }
+      return e;
+    });
+    setEntries(updatedEntries);
+    localStorage.setItem("offline_entries", JSON.stringify(updatedEntries));
+    showSuccess("Cell updated!");
+    setEditingCell(null);
+  };
+
+  // Add blank row directly into spreadsheet
+  const handleAddBlankRow = () => {
+    const newEntry: TransactionEntry = {
+      rowNumber: entries.length + 1,
+      date: new Date().toISOString().split("T")[0],
+      name: "New Entry",
+      amount: 0,
+      type: "Paid",
+      description: "Direct entry",
+      createdTime: new Date().toLocaleDateString() + ", " + new Date().toLocaleTimeString(),
     };
-    window.addEventListener("storage", handleStorageChange);
-    return () => window.removeEventListener("storage", handleStorageChange);
-  }, []);
+    const updated = [newEntry, ...entries];
+    setEntries(updated);
+    localStorage.setItem("offline_entries", JSON.stringify(updated));
+    showSuccess("Added blank row!");
+    setEditingCell({ createdTime: newEntry.createdTime, field: "name" });
+    setEditingValue("New Entry");
+  };
 
-  // Handle Sheet Connection once authenticated
-  useEffect(() => {
-    if (token && !needsAuth) {
-      ensureGoogleSheet();
+  // Delete row by ID/createdTime
+  const handleDeleteRow = (createdTime: string) => {
+    const updated = entries.filter(e => e.createdTime !== createdTime);
+    setEntries(updated);
+    localStorage.setItem("offline_entries", JSON.stringify(updated));
+    showSuccess("Row deleted!");
+    if (deleteConfirmRow === createdTime) {
+      setDeleteConfirmRow(null);
     }
-  }, [token, needsAuth]);
+  };
 
-  // Fetch entries when sheet is connected
+  const ensureGoogleSheet = async () => {
+    // No-op in local credentials mode
+  };
+
+  // Logout handler
+  const handleLogout = async () => {
+    setActiveProfile(null);
+    localStorage.removeItem("active_profile");
+    setEntries([]);
+    showSuccess("Logged out successfully.");
+  };
+
+  // Fetch entries from local storage on mount and when activeProfile changes
   useEffect(() => {
-    if (token && spreadsheetId) {
-      fetchSheetEntries();
+    const stored = localStorage.getItem("offline_entries");
+    if (stored) {
+      try {
+        setEntries(JSON.parse(stored));
+      } catch (e) {
+        setEntries([]);
+      }
+    } else {
+      setEntries([]);
     }
-  }, [token, spreadsheetId]);
+  }, [activeProfile]);
 
   // Keep assistant instructions updated with latest state
   useEffect(() => {
     if (needsAuth) {
-      setAssistantText("Please sign in with Google to enable Unified Infracon and automatically link with Google Sheets.");
-    } else if (isEnsuringSheet) {
-      setAssistantText("Setting up your Google Sheets ledger. Please wait...");
+      setAssistantText("Please sign in with your Username & Password to access the Unified Infracon ledger.");
     } else if (parsedTransaction) {
       if (parsedTransaction.amountMissing) {
         setAssistantText(`I understood: "${parsedTransaction.name || "Self"}" transaction but the amount is missing. Please enter or speak the amount.`);
@@ -190,7 +320,7 @@ export default function App() {
     } else {
       setAssistantText("Click the microphone and speak naturally! E.g. 'Paid Rajesh five thousand rupees' or 'Rajesh ko panchtas rupaye diye' or 'Mahesh kadun sat hajar ghetle'.");
     }
-  }, [needsAuth, isEnsuringSheet, parsedTransaction]);
+  }, [needsAuth, parsedTransaction]);
 
   // Trigger TTS voice response
   const speak = (text: string) => {
@@ -201,7 +331,7 @@ export default function App() {
 
     // Check language patterns in text to select voice
     let lang = "en-US";
-    if (text.includes("यशस्वीरित्या") || text.includes("झाले") || text.includes("रुपये") || text.includes("माहिती")) {
+    if (text.includes("यशस्वीरित्या") || text.includes("झाले") || text.includes("रुपये") || text.includes("माहिती") || text.includes("सेंड") || text.includes("झाला") || text.includes("डेटा")) {
       lang = "mr-IN";
     } else if (text.includes("सफलतापूर्वक") || text.includes("सहेज") || text.includes("दिए") || text.includes("रुपए")) {
       lang = "hi-IN";
@@ -216,105 +346,6 @@ export default function App() {
     utterance.onerror = () => setIsSpeaking(false);
 
     window.speechSynthesis.speak(utterance);
-  };
-
-  // Login handler
-  const handleLogin = async () => {
-    setIsLoggingIn(true);
-    try {
-      const result = await googleSignIn();
-      if (result) {
-        setToken(result.accessToken);
-        setUser(result.user);
-        setNeedsAuth(false);
-        showSuccess("Logged in successfully!");
-      }
-    } catch (err: any) {
-      console.error("Login Error details:", err);
-      const errorCode = err?.code || "unknown-error";
-      const errorMessage = err?.message || err?.toString() || "No detailed error message provided.";
-      
-      let friendlyMsg = `Sign in failed: ${errorMessage} (${errorCode})`;
-      if (errorCode === "auth/popup-blocked") {
-        friendlyMsg = "Sign in popup was blocked by your browser. Please allow popups or click 'Open App in New Tab' below to sign in.";
-      } else if (errorCode === "auth/operation-not-allowed") {
-        friendlyMsg = "Google Sign-In is not enabled in your Firebase Console. Please go to Firebase Console > Authentication > Sign-in method and enable Google.";
-      } else if (errorCode === "auth/unauthorized-domain") {
-        friendlyMsg = "This domain is not authorized in your Firebase Console under Authentication > Settings > Authorized domains.";
-      }
-      showError(friendlyMsg);
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  // Logout handler
-  const handleLogout = async () => {
-    try {
-      await logout();
-      setUser(null);
-      setToken(null);
-      setSpreadsheetId(null);
-      setSheetUrl(null);
-      setEntries([]);
-      setNeedsAuth(true);
-      showSuccess("Logged out successfully.");
-    } catch (err: any) {
-      showError("Logout failed.");
-    }
-  };
-
-  // Search or Create "Voice Ledger AI" spreadsheet in Google Sheets
-  const ensureGoogleSheet = async () => {
-    if (!token) return;
-    setIsEnsuringSheet(true);
-    try {
-      const res = await fetch("/api/sheets/ensure-sheet", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to configure Google Sheet ledger.");
-      }
-
-      const data = await res.json();
-      setSpreadsheetId(data.spreadsheetId);
-      setSheetUrl(data.url);
-      if (data.newlyCreated) {
-        showSuccess("New Google Sheet ledger 'Unified Infracon' created!");
-        speak("Google Sheet configured successfully.");
-      }
-    } catch (err: any) {
-      console.error(err);
-      showError("Could not link with Google Sheets. Please re-authenticate.");
-    } finally {
-      setIsEnsuringSheet(false);
-    }
-  };
-
-  // Fetch entries from Google Sheets
-  const fetchSheetEntries = async () => {
-    if (!token || !spreadsheetId) return;
-    setIsLoadingEntries(true);
-    try {
-      const res = await fetch(`/api/sheets/list?spreadsheetId=${spreadsheetId}`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setEntries(data.entries || []);
-      }
-    } catch (err) {
-      console.error("Fetch entries error:", err);
-    } finally {
-      setIsLoadingEntries(false);
-    }
   };
 
   // Toast Helpers
@@ -351,7 +382,7 @@ export default function App() {
       const rec = new SpeechRecognition();
       rec.continuous = false;
       rec.interimResults = false;
-      rec.lang = "en-US"; // Standard multilingual fallback; Web Speech detects mixed language well on standard configs
+      rec.lang = voiceLang; // Configured speech language: mr-IN, hi-IN, or en-IN
 
       rec.onstart = () => {
         setIsListening(true);
@@ -394,9 +425,107 @@ export default function App() {
     setIsListening(false);
   };
 
+  // Core unified save transaction function
+  const saveTransactionDirectly = async (tx: ParsedTransaction) => {
+    setIsSaving(true);
+
+    if (isOfflineMode || !token || !spreadsheetId) {
+      try {
+        const displayNameToUse = tx.name && tx.name !== "Self" ? tx.name : (activeProfile?.displayName || "Self");
+        const newEntry: TransactionEntry = {
+          rowNumber: entries.length + 1,
+          date: tx.date || new Date().toISOString().split("T")[0],
+          name: displayNameToUse,
+          amount: tx.amount,
+          type: tx.type,
+          description: tx.description || "Local Entry",
+          createdTime: new Date().toLocaleDateString() + ", " + new Date().toLocaleTimeString(),
+        };
+        const updatedEntries = [newEntry, ...entries];
+        setEntries(updatedEntries);
+        localStorage.setItem("offline_entries", JSON.stringify(updatedEntries));
+
+        showSuccess(`Transaction saved locally!`);
+        
+        // Voice feedback
+        let feedback = "";
+        if (tx.detectedLanguage === "Marathi" || voiceLang === "mr-IN") {
+          feedback = `डेटा यशस्वीपणे सेंड झाला आहे. ${displayNameToUse} साठी ${tx.amount} रुपये सेव्ह झाले.`;
+        } else if (tx.detectedLanguage === "Hindi" || voiceLang === "hi-IN") {
+          feedback = `डेटा सफलतापूर्वक सेंड हो गया है। ${displayNameToUse} के ${tx.amount} रुपये सहेज लिए गए हैं।`;
+        } else {
+          feedback = `Data sent successfully. Transaction of ${tx.amount} for ${displayNameToUse} saved.`;
+        }
+        speak(feedback);
+
+        // Reset transaction states
+        setParsedTransaction(null);
+        setWaitingForConfirmation(false);
+        setManualAmount("");
+        setSimulatedText("");
+        setLastTranscript("");
+      } catch (err) {
+        console.error("Local save error:", err);
+        showError("Failed to save transaction locally.");
+      } finally {
+        setIsSaving(false);
+      }
+      return;
+    }
+
+    try {
+      const res = await fetch("/api/sheets/append", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          spreadsheetId,
+          transaction: tx,
+        }),
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to write to Google Sheets");
+      }
+
+      showSuccess(`Transaction saved to spreadsheet successfully!`);
+      
+      // Voice feedback
+      let feedback = "";
+      if (tx.detectedLanguage === "Marathi" || voiceLang === "mr-IN") {
+        feedback = `डेटा यशस्वीपणे सेंड झाला आहे. ${tx.name || "व्यवहार"} साठी ${tx.amount} रुपये गुगल शीट मध्ये जोडले गेले आहेत.`;
+      } else if (tx.detectedLanguage === "Hindi" || voiceLang === "hi-IN") {
+        feedback = `डेटा सफलतापूर्वक सेंड हो गया है। ${tx.name || "लेनदेन"} के ${tx.amount} रुपये गुगल शीट में जोड दिए गए हैं।`;
+      } else {
+        feedback = `Data sent successfully. Transaction of ${tx.amount} saved to spreadsheet.`;
+      }
+      speak(feedback);
+
+      // Reset transaction states
+      setParsedTransaction(null);
+      setWaitingForConfirmation(false);
+      setManualAmount("");
+      setSimulatedText("");
+      setLastTranscript("");
+      
+      // Fetch fresh entries to update table
+      fetchSheetEntries();
+    } catch (err: any) {
+      console.error(err);
+      showError("Failed to save. Google Sheets permissions might have expired.");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   // Handle parsing once we have clean text (either from speech recognition or simulation input)
   const handleVoiceInputParsed = async (textToParse: string) => {
     if (!textToParse || textToParse.trim().length === 0) return;
+
+    // Clear the textbox input immediately so the user knows it has been sent
+    setTranscript("");
 
     const lowerText = textToParse.toLowerCase().trim();
 
@@ -501,8 +630,21 @@ export default function App() {
             ? `${data.name || "सेल्फ"} के लेनदेन में राशि नहीं मिली। कृपया राशि दर्ज करें।` 
             : `Transaction found for ${data.name || "Self"} but the amount is missing. Please state the amount.`);
       } else {
-        setWaitingForConfirmation(true);
-        triggerConfirmationSpeech(data);
+        if (autoSubmit) {
+          let autoMsg = "";
+          if (data.detectedLanguage === "Marathi" || voiceLang === "mr-IN") {
+            autoMsg = `व्यवहार मिळाला. गुगल शीट मध्ये थेट सेव्ह करत आहे.`;
+          } else if (data.detectedLanguage === "Hindi" || voiceLang === "hi-IN") {
+            autoMsg = `लेनदेन मिल गया है। इसे सीधे शीट में सहेज रहे हैं।`;
+          } else {
+            autoMsg = `Transaction recognized. Automatically saving to spreadsheet...`;
+          }
+          speak(autoMsg);
+          await saveTransactionDirectly(data);
+        } else {
+          setWaitingForConfirmation(true);
+          triggerConfirmationSpeech(data);
+        }
       }
     } catch (err: any) {
       console.error(err);
@@ -527,15 +669,13 @@ export default function App() {
 
   // Voice trigger for delete last entry
   const handleDeleteLastEntryWithVoicePrompt = () => {
-    const confirmed = window.confirm("Are you sure you want to delete the last entry in the spreadsheet?");
-    if (confirmed) {
-      handleDeleteLastEntry();
-    }
+    setShowDeleteLastConfirm(true);
   };
 
-  // Submit parsed transaction to Google Sheets
+  // Submit parsed transaction to Google Sheets or Local Storage if offline
   const handleSaveTransaction = async () => {
-    if (!token || !spreadsheetId || !parsedTransaction) return;
+    if (!parsedTransaction) return;
+    if (!isOfflineMode && (!token || !spreadsheetId)) return;
     
     // Check if amount is still missing
     if (parsedTransaction.amountMissing && !manualAmount) {
@@ -544,57 +684,18 @@ export default function App() {
       return;
     }
 
+    const amountValue = parsedTransaction.amountMissing ? parseFloat(manualAmount) : parsedTransaction.amount;
+    if (amountValue === null || isNaN(amountValue || 0)) {
+      showError("Invalid transaction amount.");
+      return;
+    }
+
     const transactionToSave = {
       ...parsedTransaction,
-      amount: parsedTransaction.amountMissing ? parseFloat(manualAmount) : parsedTransaction.amount,
+      amount: amountValue!,
     };
 
-    setIsSaving(true);
-    try {
-      const res = await fetch("/api/sheets/append", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          spreadsheetId,
-          transaction: transactionToSave,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to write to Google Sheets");
-      }
-
-      showSuccess(`Transaction saved to spreadsheet successfully!`);
-      
-      // Voice feedback
-      let feedback = "";
-      if (parsedTransaction.detectedLanguage === "Marathi") {
-        feedback = `${transactionToSave.name || "व्यवहार"} साठी ${transactionToSave.amount} रुपये यशस्वीरित्या सेव्ह झाले. माहिती गुगल शीट मध्ये जोडली गेली आहे.`;
-      } else if (parsedTransaction.detectedLanguage === "Hindi") {
-        feedback = `${transactionToSave.name || "लेनदेन"} के ${transactionToSave.amount} रुपये सफलतापूर्वक सहेज लिए गए हैं।`;
-      } else {
-        feedback = `Transaction of ${transactionToSave.amount} saved successfully.`;
-      }
-      speak(feedback);
-
-      // Reset transaction states
-      setParsedTransaction(null);
-      setWaitingForConfirmation(false);
-      setManualAmount("");
-      setSimulatedText("");
-      setLastTranscript("");
-      
-      // Refresh list
-      fetchSheetEntries();
-    } catch (err: any) {
-      console.error(err);
-      showError("Failed to save. Google Sheets permissions might have expired.");
-    } finally {
-      setIsSaving(false);
-    }
+    await saveTransactionDirectly(transactionToSave);
   };
 
   // Abort currently parsed transaction
@@ -608,8 +709,30 @@ export default function App() {
     showSuccess("Transaction discarded.");
   };
 
-  // Delete last spreadsheet row
+  // Delete last spreadsheet row or local entry
   const handleDeleteLastEntry = async () => {
+    if (isOfflineMode) {
+      if (entries.length === 0) {
+        showError("No entries to delete.");
+        speak("Nothing to delete.");
+        return;
+      }
+      setIsSaving(true);
+      try {
+        const updatedEntries = entries.slice(1);
+        setEntries(updatedEntries);
+        localStorage.setItem("offline_entries", JSON.stringify(updatedEntries));
+        showSuccess("Last local entry deleted successfully.");
+        speak("Deleted last entry.");
+      } catch (err) {
+        console.error("Local delete error:", err);
+        showError("Failed to delete local entry.");
+      } finally {
+        setIsSaving(false);
+      }
+      return;
+    }
+
     if (!token || !spreadsheetId) return;
     setIsSaving(true);
     try {
@@ -785,6 +908,14 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Secure Session Active Profile */}
+            {activeProfile && (
+              <div className="flex items-center gap-2 bg-brand-orange/10 border border-brand-orange/20 text-brand-orange text-xs px-3 py-1.5 rounded-xl font-semibold">
+                <span className="h-2 w-2 bg-brand-orange rounded-full animate-pulse" />
+                <span>Secure Ledger Session</span>
+              </div>
+            )}
+
             {/* Dark Mode toggle */}
             <button 
               onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
@@ -839,78 +970,414 @@ export default function App() {
                 </button>
               </div>
             )}
+
+            {/* Offline Active Profile */}
+            {isOfflineMode && activeProfile && (
+              <div className="flex items-center gap-3 ml-2 pl-4 border-l border-slate-200 dark:border-slate-800">
+                <div className={`h-9 w-9 rounded-full ${activeProfile.avatarColor} text-white flex items-center justify-center font-bold text-sm shadow-sm ring-2 ring-amber-500/40`}>
+                  {activeProfile.displayName.charAt(0).toUpperCase()}
+                </div>
+                <div className="hidden sm:block text-left">
+                  <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 leading-tight">
+                    {activeProfile.displayName}
+                  </p>
+                  {activeProfile.role && (
+                    <p className="text-[10px] text-slate-400 font-medium">
+                      {activeProfile.role}
+                    </p>
+                  )}
+                </div>
+                <button 
+                  onClick={() => {
+                    setActiveProfile(null);
+                    localStorage.removeItem("active_profile");
+                    showSuccess("Logged out of local profile.");
+                  }}
+                  className="p-2 rounded-xl text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-all"
+                  title="Switch Profile / Logout"
+                  id="local-logout-btn"
+                >
+                  <LogOut className="h-5 w-5" />
+                </button>
+              </div>
+            )}
           </div>
         </header>
 
-        {/* OAuth Authentication Screen (If not signed in) */}
+        {/* Local Username and Password Authentication System */}
         {needsAuth ? (
-          <div className="max-w-xl mx-auto my-12 py-10 px-8 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800/80 rounded-3xl shadow-xl text-center glow-blue transition-all duration-300">
-            <div className="p-4 bg-brand-orange/10 text-brand-orange rounded-2xl w-fit mx-auto mb-6">
-              <Database className="h-10 w-10 animate-pulse" />
-            </div>
-            <h2 className="text-2xl md:text-3xl font-display font-bold mb-3">
-              Connect Google Sheets Ledger
-            </h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mb-8 max-w-sm mx-auto leading-relaxed">
-              Sign in with your Google account. We will automatically create a secure <b>Unified Infracon</b> spreadsheet inside your Google Drive to log and calculate your spoken entries.
-            </p>
-
-            {/* Embedded Iframe Popup Blocker Notice */}
-            <div className="mb-6 p-4 bg-amber-50 dark:bg-amber-950/20 border border-amber-200/50 dark:border-amber-900/30 rounded-xl text-left flex items-start gap-3">
-              <AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <h4 className="text-sm font-semibold text-amber-800 dark:text-amber-300">
-                  Are popups blocked?
-                </h4>
-                <p className="text-xs text-amber-700/80 dark:text-amber-400/80 mt-1 leading-relaxed">
-                  Inside the AI Studio preview iframe, browsers block Google sign-in popups. 
-                  For a fully seamless sign-in, click the <b>Open App in New Tab</b> button below, sign in there, and then your session will automatically sync here!
-                </p>
+          <div className="max-w-xl mx-auto my-12 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800/80 rounded-3xl shadow-xl overflow-hidden transition-all duration-300">
+            {/* Header banner */}
+            <div className="bg-slate-900 dark:bg-slate-950 p-6 text-center border-b border-slate-800">
+              <div className="p-3 bg-brand-orange/10 text-brand-orange rounded-2xl w-fit mx-auto mb-3">
+                <Lock className="h-8 w-8 text-brand-orange" />
               </div>
+              <h2 className="text-2xl font-display font-bold text-white">
+                Unified Infracon Secure Ledger
+              </h2>
+              <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                Secure access to construction transactions & voice logs. Create or select a profile below to sign in.
+              </p>
             </div>
 
-            {/* Actions: Sign In or Open In New Tab */}
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-3 max-w-md mx-auto">
-              <button 
-                onClick={handleLogin}
-                disabled={isLoggingIn}
-                id="google-signin-btn"
-                className="w-full sm:w-1/2 py-3 px-4 bg-white border border-slate-300 hover:bg-slate-50 dark:bg-slate-800 dark:border-slate-700 dark:hover:bg-slate-700/80 text-slate-700 dark:text-slate-200 font-medium rounded-xl flex items-center justify-center gap-2.5 shadow-sm hover:shadow transition-all disabled:opacity-50 text-sm"
+            {/* Navigation Tabs */}
+            <div className="flex border-b border-slate-100 dark:border-slate-800">
+              <button
+                onClick={() => {
+                  setLoginMode("select");
+                  setSelectedProfileForPassword(null);
+                  setInlinePassword("");
+                }}
+                className={`w-1/3 py-3.5 text-xs font-semibold uppercase tracking-wider border-b-2 transition-all ${
+                  loginMode === "select"
+                    ? "border-brand-orange text-brand-orange bg-slate-50/50 dark:bg-slate-900/50"
+                    : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                }`}
               >
-                {isLoggingIn ? (
-                  <RefreshCw className="h-4 w-4 animate-spin text-slate-500" />
-                ) : (
-                  <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="h-4 w-4 shrink-0">
-                    <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
-                    <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
-                    <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
-                    <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
-                  </svg>
-                )}
-                <span>{isLoggingIn ? "Connecting..." : "Sign in with Google"}</span>
+                Select Profile
               </button>
+              <button
+                onClick={() => {
+                  setLoginMode("direct");
+                  setUsernameInput("");
+                  setPasswordInput("");
+                }}
+                className={`w-1/3 py-3.5 text-xs font-semibold uppercase tracking-wider border-b-2 transition-all ${
+                  loginMode === "direct"
+                    ? "border-brand-orange text-brand-orange bg-slate-50/50 dark:bg-slate-900/50"
+                    : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                }`}
+              >
+                Direct Login
+              </button>
+              <button
+                onClick={() => {
+                  setLoginMode("register");
+                  setNewProfileName("");
+                  setNewProfileUsername("");
+                  setNewProfilePassword("");
+                }}
+                className={`w-1/3 py-3.5 text-xs font-semibold uppercase tracking-wider border-b-2 transition-all ${
+                  loginMode === "register"
+                    ? "border-brand-orange text-brand-orange bg-slate-50/50 dark:bg-slate-900/50"
+                    : "border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+                }`}
+              >
+                Add User
+              </button>
+            </div>
 
-              <button 
-                onClick={() => window.open(window.location.href, "_blank")}
-                className="w-full sm:w-1/2 py-3 px-4 bg-brand-orange text-white hover:bg-brand-orange/90 font-medium rounded-xl flex items-center justify-center gap-2 shadow-md hover:shadow-lg transition-all text-sm"
-              >
-                <ExternalLink className="h-4 w-4" />
-                <span>Open App in New Tab</span>
-              </button>
+            <div className="p-8">
+              {loginMode === "select" && (
+                <div className="space-y-6">
+                  {!selectedProfileForPassword ? (
+                    <>
+                      <p className="text-xs text-slate-400 dark:text-slate-500 text-center font-mono uppercase tracking-wider">
+                        Profiles Online (Click to enter password)
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                        {profiles.map((prof) => (
+                          <button
+                            key={prof.id}
+                            onClick={() => {
+                              setSelectedProfileForPassword(prof);
+                              setInlinePassword("");
+                            }}
+                            className="p-4 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800/60 hover:scale-[1.02] text-left transition-all flex items-center gap-3.5"
+                          >
+                            <div className={`h-11 w-11 rounded-full ${prof.avatarColor} text-white flex items-center justify-center font-bold text-lg shadow-sm`}>
+                              {prof.displayName.charAt(0).toUpperCase()}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <h4 className="font-semibold text-slate-800 dark:text-slate-200 text-sm truncate">
+                                {prof.displayName}
+                              </h4>
+                              {prof.role && (
+                                <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
+                                  {prof.role}
+                                </p>
+                              )}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    /* Password prompt for selected profile */
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        const correctPassword = selectedProfileForPassword.password || "123";
+                        if (inlinePassword === correctPassword) {
+                          setActiveProfile(selectedProfileForPassword);
+                          showSuccess(`Signed in as ${selectedProfileForPassword.displayName}!`);
+                          setSelectedProfileForPassword(null);
+                          setInlinePassword("");
+                        } else {
+                          showError("Incorrect password. Default is 123.");
+                        }
+                      }}
+                      className="space-y-4"
+                    >
+                      <div className="text-center mb-4">
+                        <div className={`h-16 w-16 rounded-full ${selectedProfileForPassword.avatarColor} text-white flex items-center justify-center font-bold text-2xl mx-auto shadow-md mb-2`}>
+                          {selectedProfileForPassword.displayName.charAt(0).toUpperCase()}
+                        </div>
+                        <h3 className="font-semibold text-slate-800 dark:text-slate-200">
+                          {selectedProfileForPassword.displayName}
+                        </h3>
+                        {selectedProfileForPassword.role && (
+                          <p className="text-xs text-slate-400">{selectedProfileForPassword.role}</p>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-mono">
+                          Enter Password
+                        </label>
+                        <input
+                          type="password"
+                          placeholder="Password (Default is 123)"
+                          value={inlinePassword}
+                          onChange={(e) => setInlinePassword(e.target.value)}
+                          className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-orange/50 text-sm transition-all"
+                          autoFocus
+                        />
+                      </div>
+
+                      <div className="flex gap-3 pt-2">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedProfileForPassword(null)}
+                          className="w-1/2 py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-medium rounded-xl transition-all text-sm"
+                        >
+                          Change Profile
+                        </button>
+                        <button
+                          type="submit"
+                          className="w-1/2 py-2.5 px-4 bg-brand-orange hover:bg-brand-orange/90 text-white font-medium rounded-xl shadow-md transition-all text-sm flex items-center justify-center gap-2"
+                        >
+                          <Check className="h-4 w-4" />
+                          <span>Login</span>
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
+              )}
+
+              {loginMode === "direct" && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!usernameInput.trim() || !passwordInput) {
+                      showError("Please enter both username and password.");
+                      return;
+                    }
+                    const userMatch = profiles.find(
+                      (p) => p.username.toLowerCase() === usernameInput.trim().toLowerCase()
+                    );
+                    if (userMatch) {
+                      const correctPassword = userMatch.password || "123";
+                      if (passwordInput === correctPassword) {
+                        setActiveProfile(userMatch);
+                        showSuccess(`Signed in as ${userMatch.displayName}!`);
+                        setUsernameInput("");
+                        setPasswordInput("");
+                      } else {
+                        showError("Incorrect password.");
+                      }
+                    } else {
+                      showError("User not found. Use 'Add User' tab to register.");
+                    }
+                  }}
+                  className="space-y-4"
+                >
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-mono">
+                      Username
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="E.g. vijay"
+                      value={usernameInput}
+                      onChange={(e) => setUsernameInput(e.target.value)}
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-orange/50 text-sm transition-all"
+                      autoFocus
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-mono">
+                      Password
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="Password (Default: 123)"
+                      value={passwordInput}
+                      onChange={(e) => setPasswordInput(e.target.value)}
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-orange/50 text-sm transition-all"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-3 px-4 bg-brand-orange hover:bg-brand-orange/90 text-white font-medium rounded-xl shadow-md transition-all text-sm flex items-center justify-center gap-2"
+                  >
+                    <Check className="h-4 w-4" />
+                    <span>Login</span>
+                  </button>
+                </form>
+              )}
+
+              {loginMode === "register" && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (!newProfileName.trim()) {
+                      showError("Please enter full name.");
+                      return;
+                    }
+                    if (!newProfileUsername.trim()) {
+                      showError("Please enter a username.");
+                      return;
+                    }
+                    
+                    const uName = newProfileUsername.trim().toLowerCase();
+                    if (profiles.some((p) => p.username.toLowerCase() === uName)) {
+                      showError("Username is already taken.");
+                      return;
+                    }
+
+                    const newProfile: OfflineProfile = {
+                      id: Date.now().toString(),
+                      displayName: newProfileName.trim(),
+                      username: uName,
+                      password: newProfilePassword || "123",
+                      role: newProfileRole,
+                      avatarColor: newProfileColor,
+                    };
+
+                    const updated = [...profiles, newProfile];
+                    setProfiles(updated);
+                    setActiveProfile(newProfile);
+                    
+                    // Reset fields
+                    setNewProfileName("");
+                    setNewProfileUsername("");
+                    setNewProfilePassword("");
+                    
+                    showSuccess(`Created account and signed in as ${newProfile.displayName}!`);
+                  }}
+                  className="space-y-4 text-left"
+                >
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-mono">
+                      Full Name
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="E.g. Sachin Kadam"
+                      value={newProfileName}
+                      onChange={(e) => setNewProfileName(e.target.value)}
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-orange/50 text-sm transition-all"
+                      autoFocus
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-mono">
+                        Username
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="E.g. sachin"
+                        value={newProfileUsername}
+                        onChange={(e) => setNewProfileUsername(e.target.value)}
+                        className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-orange/50 text-sm transition-all"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-mono">
+                        Password
+                      </label>
+                      <input
+                        type="password"
+                        placeholder="Default: 123"
+                        value={newProfilePassword}
+                        onChange={(e) => setNewProfilePassword(e.target.value)}
+                        className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-brand-orange/50 text-sm transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1.5 font-mono">
+                      Role / Designation
+                    </label>
+                    <select
+                      value={newProfileRole}
+                      onChange={(e) => setNewProfileRole(e.target.value)}
+                      className="w-full px-4 py-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-orange/50 text-sm transition-all"
+                    >
+                      <option value="Accounts Manager">Accounts Manager</option>
+                      <option value="Client Representative">Client Representative</option>
+                      <option value="Subcontractor">Subcontractor</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-2 font-mono">
+                      Avatar Color
+                    </label>
+                    <div className="flex gap-2.5">
+                      {[
+                        { class: "bg-indigo-600", label: "Indigo" },
+                        { class: "bg-emerald-600", label: "Emerald" },
+                        { class: "bg-rose-600", label: "Rose" },
+                        { class: "bg-amber-600", label: "Amber" },
+                        { class: "bg-cyan-600", label: "Cyan" },
+                        { class: "bg-purple-600", label: "Purple" }
+                      ].map((col) => (
+                        <button
+                          key={col.class}
+                          type="button"
+                          onClick={() => setNewProfileColor(col.class)}
+                          className={`h-8 w-8 rounded-full ${col.class} flex items-center justify-center text-white font-bold transition-transform shadow-sm relative`}
+                          title={col.label}
+                        >
+                          {newProfileColor === col.class && (
+                            <Check className="h-4 w-4" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    className="w-full py-3 px-4 bg-brand-orange hover:bg-brand-orange/90 text-white font-medium rounded-xl shadow-md transition-all text-sm flex items-center justify-center gap-2"
+                  >
+                    <Check className="h-4 w-4" />
+                    <span>Create & Sign In</span>
+                  </button>
+                </form>
+              )}
             </div>
             
-            <div className="mt-8 pt-6 border-t border-slate-100 dark:border-slate-800 text-left">
-              <h3 className="text-xs font-semibold font-mono text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-3">
-                Supported Vijay Speech
+            <div className="px-8 pb-8 pt-4 border-t border-slate-100 dark:border-slate-800 text-left bg-slate-50/50 dark:bg-slate-900/50">
+              <h3 className="text-xs font-semibold font-mono text-slate-400 dark:text-slate-500 uppercase tracking-wider mb-2">
+                Supported Voice Languages
               </h3>
-              <div className="grid grid-cols-3 gap-2 text-center text-xs text-slate-500 dark:text-slate-400">
-                <div className="bg-slate-100 dark:bg-slate-800/50 p-2.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50 font-medium">
+              <div className="grid grid-cols-3 gap-2 text-center text-xs text-slate-500 dark:text-slate-400 font-medium">
+                <div className="bg-white dark:bg-slate-800 p-2.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
                   Marathi (मराठी)
                 </div>
-                <div className="bg-slate-100 dark:bg-slate-800/50 p-2.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50 font-medium">
+                <div className="bg-white dark:bg-slate-800 p-2.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
                   Hindi (हिंदी)
                 </div>
-                <div className="bg-slate-100 dark:bg-slate-800/50 p-2.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50 font-medium">
+                <div className="bg-white dark:bg-slate-800 p-2.5 rounded-lg border border-slate-200/50 dark:border-slate-800/50">
                   English (US/UK/IN)
                 </div>
               </div>
@@ -931,6 +1398,54 @@ export default function App() {
                   <Volume2 className="h-5 w-5 text-brand-orange" />
                   Voice Control Assistant
                 </h2>
+
+                {/* Voice Assistant Settings Panel */}
+                <div className="bg-slate-50 dark:bg-slate-950/80 p-3.5 rounded-2xl border border-slate-200/50 dark:border-slate-800/80 mb-4 text-left">
+                  <div className="mb-2.5">
+                    <span className="text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500 uppercase tracking-widest block mb-1.5">
+                      Select Speech Language / भाषा निवडा
+                    </span>
+                    <div className="grid grid-cols-3 gap-1.5">
+                      {[
+                        { code: "mr-IN", label: "मराठी (Marathi)" },
+                        { code: "hi-IN", label: "हिंदी (Hindi)" },
+                        { code: "en-IN", label: "English / Mix" }
+                      ].map((lang) => (
+                        <button
+                          key={lang.code}
+                          onClick={() => setVoiceLang(lang.code)}
+                          className={`py-1.5 px-2 rounded-xl text-xs font-semibold transition-all border ${
+                            voiceLang === lang.code
+                              ? "bg-brand-orange/10 border-brand-orange text-brand-orange shadow-sm"
+                              : "bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800"
+                          }`}
+                        >
+                          {lang.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between border-t border-slate-200/50 dark:border-slate-800/50 pt-2.5 mt-2.5">
+                    <div>
+                      <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block">
+                        Auto-Save to Spreadsheet
+                      </span>
+                      <span className="text-[10px] text-slate-400 dark:text-slate-500 block">
+                        थेट स्प्रेडशीट मध्ये सेव्ह करा (Direct send)
+                      </span>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input 
+                        type="checkbox" 
+                        checked={autoSubmit} 
+                        onChange={(e) => setAutoSubmit(e.target.checked)} 
+                        className="sr-only peer" 
+                      />
+                      <div className="w-9 h-5 bg-slate-200 dark:bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-brand-orange"></div>
+                    </label>
+                  </div>
+                </div>
 
                 {/* Microphone Central Hub */}
                 <div className="flex flex-col items-center py-6 text-center">
@@ -987,17 +1502,47 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* Real-time speech result feed */}
-                {(transcript || lastTranscript) && (
-                  <div className="p-3.5 bg-brand-orange/5 border border-brand-orange/20 rounded-xl mb-4">
-                    <span className="text-[10px] font-bold font-mono text-brand-orange uppercase tracking-wider">
-                      Spoken Transcript:
+                {/* Real-time speech and manual text editor feed */}
+                <div className="p-3.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl mb-4 text-left">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[10px] font-bold font-mono text-brand-orange uppercase tracking-wider flex items-center gap-1">
+                      <FileText className="h-3.5 w-3.5" />
+                      Command Text / टाईप किंवा बोललेले मजकूर
                     </span>
-                    <p className="text-sm font-sans font-semibold text-slate-800 dark:text-slate-200 italic mt-0.5">
-                      "{transcript || lastTranscript}"
-                    </p>
+                    {transcript && (
+                      <button
+                        onClick={() => setTranscript("")}
+                        className="text-[10px] text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 font-semibold transition-all"
+                      >
+                        Clear / साफ करा
+                      </button>
+                    )}
                   </div>
-                )}
+                  <div className="flex flex-col gap-2">
+                    <textarea
+                      value={transcript}
+                      onChange={(e) => setTranscript(e.target.value)}
+                      placeholder="येथे टाईप करा किंवा माईक दाबून बोला... (E.g. राजेश ला ५००० रुपये दिले)"
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl px-3 py-2 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-brand-orange focus:ring-1 focus:ring-brand-orange min-h-[64px] resize-none"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault();
+                          if (transcript.trim() && !isParsing) {
+                            handleVoiceInputParsed(transcript);
+                          }
+                        }
+                      }}
+                    />
+                    <button
+                      onClick={() => handleVoiceInputParsed(transcript)}
+                      disabled={!transcript.trim() || isParsing}
+                      className="w-full py-2.5 bg-brand-orange hover:bg-brand-orange/90 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-1.5"
+                    >
+                      <Send className="h-3.5 w-3.5" />
+                      डेटा पाठवा / Send Data
+                    </button>
+                  </div>
+                </div>
 
                 {/* Parsing / AI Processing Loader */}
                 {isParsing && (
@@ -1008,37 +1553,14 @@ export default function App() {
                 )}
               </div>
 
-              {/* Simulation Entry Box for standard text backup */}
-              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800/90 rounded-3xl p-5 shadow-lg">
-                <h3 className="text-xs font-bold font-mono uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-1.5">
-                  <FileText className="h-3.5 w-3.5" />
-                  Type Natural Command (Simulation)
-                </h3>
-                <div className="flex gap-2">
-                  <input 
-                    type="text"
-                    value={simulatedText}
-                    onChange={(e) => setSimulatedText(e.target.value)}
-                    placeholder="E.g. Rajesh ko 5000 diye, or click Help"
-                    className="flex-1 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2 text-sm text-slate-900 dark:text-slate-100 placeholder:text-slate-400 dark:placeholder:text-slate-600 focus:outline-none focus:border-brand-orange"
-                    onKeyDown={(e) => e.key === "Enter" && triggerSimulationParse()}
-                    id="simulation-input"
-                  />
-                  <button 
-                    onClick={triggerSimulationParse}
-                    className="px-4 py-2 bg-brand-orange hover:bg-brand-orange-hover text-white rounded-xl text-xs font-semibold transition-all shadow-sm"
-                    id="simulate-btn"
-                  >
-                    Analyze
-                  </button>
-                </div>
-                {recognitionError && (
-                  <p className="text-xs text-amber-500 font-medium mt-3 flex items-center gap-1">
+              {recognitionError && (
+                <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800/90 rounded-3xl p-5 shadow-lg">
+                  <p className="text-xs text-amber-500 font-medium flex items-center gap-1">
                     <AlertCircle className="h-3.5 w-3.5" />
                     {recognitionError}
                   </p>
-                )}
-              </div>
+                </div>
+              )}
 
               {/* Confirmation details form / screen */}
               {parsedTransaction && (
@@ -1234,24 +1756,64 @@ export default function App() {
               {/* Activity Ledger Block */}
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800/80 rounded-3xl p-6 shadow-xl">
                 
-                {/* Search & Filter Header */}
-                <div className="flex flex-col sm:flex-row justify-between items-stretch sm:items-center gap-4 mb-6">
+                {/* Search, View Toggles & Action Header */}
+                <div className="flex flex-col xl:flex-row justify-between items-stretch xl:items-center gap-4 mb-6">
                   <div>
                     <h3 className="text-lg font-display font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                      <FileText className="h-5 w-5 text-brand-orange" />
-                      Recent Entries
+                      <FileSpreadsheet className="h-5 w-5 text-brand-orange" />
+                      <span>Ledger Spreadsheet</span>
                     </h3>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Total {filteredEntries.length} items found
+                      Total {filteredEntries.length} entries. Double-click any cell to edit directly!
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-2.5">
+                  {/* Toggle and Action Buttons */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    {/* View Switcher */}
+                    <div className="bg-slate-100 dark:bg-slate-950 p-1 border border-slate-200 dark:border-slate-800 rounded-xl flex">
+                      <button
+                        onClick={() => setLedgerViewMode("spreadsheet")}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all ${
+                          ledgerViewMode === "spreadsheet"
+                            ? "bg-brand-orange text-white shadow-sm"
+                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-300"
+                        }`}
+                      >
+                        <FileSpreadsheet className="h-3.5 w-3.5" />
+                        <span>Spreadsheet</span>
+                      </button>
+                      <button
+                        onClick={() => setLedgerViewMode("list")}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all ${
+                          ledgerViewMode === "list"
+                            ? "bg-brand-orange text-white shadow-sm"
+                            : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-300"
+                        }`}
+                      >
+                        <FileText className="h-3.5 w-3.5" />
+                        <span>List View</span>
+                      </button>
+                    </div>
+
+                    {/* Add blank row (Only for Spreadsheet Mode) */}
+                    {ledgerViewMode === "spreadsheet" && (
+                      <button
+                        onClick={handleAddBlankRow}
+                        className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1 transition-all shadow-sm"
+                        title="Add New Empty Row"
+                        id="add-blank-row-btn"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        <span>Add Row</span>
+                      </button>
+                    )}
+
                     {/* CSV Download Button */}
                     {entries.length > 0 && (
                       <button
                         onClick={handleDownloadCSV}
-                        className="p-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-xl text-slate-600 dark:text-slate-300 transition-all"
+                        className="p-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-xl text-slate-600 dark:text-slate-300 transition-all border border-slate-200/50 dark:border-slate-800"
                         title="Download CSV"
                         id="download-csv-btn"
                       >
@@ -1263,7 +1825,7 @@ export default function App() {
                     {entries.length > 0 && (
                       <button
                         onClick={handleDeleteLastEntryWithVoicePrompt}
-                        className="p-2.5 bg-slate-100 hover:bg-rose-500/10 dark:bg-slate-800 dark:hover:bg-rose-500/10 rounded-xl text-slate-600 dark:text-slate-400 hover:text-rose-500 dark:hover:text-rose-400 transition-all"
+                        className="p-2.5 bg-slate-100 hover:bg-rose-500/10 dark:bg-slate-800 dark:hover:bg-rose-500/10 rounded-xl text-slate-600 dark:text-slate-400 hover:text-rose-500 dark:hover:text-rose-400 transition-all border border-slate-200/50 dark:border-slate-800"
                         title="Delete Last Entry"
                         id="delete-last-btn"
                       >
@@ -1275,7 +1837,7 @@ export default function App() {
                     <button
                       onClick={fetchSheetEntries}
                       disabled={isLoadingEntries}
-                      className="p-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-xl text-slate-600 dark:text-slate-300 transition-all"
+                      className="p-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 rounded-xl text-slate-600 dark:text-slate-300 transition-all border border-slate-200/50 dark:border-slate-800"
                       title="Sync Ledger"
                       id="sync-ledger-btn"
                     >
@@ -1316,7 +1878,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Grid Lists */}
+                {/* Main Views Container */}
                 {isLoadingEntries ? (
                   <div className="py-12 text-center">
                     <RefreshCw className="h-8 w-8 text-brand-orange animate-spin mx-auto mb-3" />
@@ -1328,10 +1890,202 @@ export default function App() {
                       No records found in this view.
                     </p>
                     <p className="text-xs text-slate-400 dark:text-slate-600 mt-1">
-                      Add entries via spoken natural voice commands!
+                      Add entries via spoken natural voice commands or add row directly above!
                     </p>
                   </div>
+                ) : ledgerViewMode === "spreadsheet" ? (
+                  /* SPREADSHEET TAB GRID */
+                  <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-2xl shadow-inner max-h-[500px]">
+                    <table className="w-full text-left border-collapse min-w-[700px]">
+                      <thead>
+                        <tr className="bg-slate-100 dark:bg-slate-950 text-[11px] text-slate-400 dark:text-slate-500 font-mono tracking-wider border-b border-slate-200 dark:border-slate-800 select-none">
+                          <th className="py-2.5 px-3 border-r border-slate-200 dark:border-slate-800 text-center w-12">#</th>
+                          <th className="py-2.5 px-3 border-r border-slate-200 dark:border-slate-800">A: DATE (तारीख)</th>
+                          <th className="py-2.5 px-3 border-r border-slate-200 dark:border-slate-800">B: NAME (नाव)</th>
+                          <th className="py-2.5 px-3 border-r border-slate-200 dark:border-slate-800 w-32">C: TYPE (प्रकार)</th>
+                          <th className="py-2.5 px-3 border-r border-slate-200 dark:border-slate-800 w-36">D: AMOUNT (रक्कम ₹)</th>
+                          <th className="py-2.5 px-3 border-r border-slate-200 dark:border-slate-800">E: DESCRIPTION (माहिती)</th>
+                          <th className="py-2.5 px-3 text-center w-16">DEL</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                        {filteredEntries.map((e, idx) => {
+                          const isEditing = (field: keyof TransactionEntry) => 
+                            editingCell?.createdTime === e.createdTime && editingCell?.field === field;
+
+                          const startEdit = (field: keyof TransactionEntry, currentValue: string | number) => {
+                            setEditingCell({ createdTime: e.createdTime, field });
+                            setEditingValue(currentValue.toString());
+                          };
+
+                          return (
+                            <tr key={e.createdTime || idx} className="hover:bg-slate-50/50 dark:hover:bg-slate-950/40 text-xs text-slate-800 dark:text-slate-200 font-sans transition-all">
+                              {/* Row Index */}
+                              <td className="py-2 px-3 border-r border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/80 text-center font-mono font-medium text-slate-400 w-12">
+                                {idx + 1}
+                              </td>
+
+                              {/* Date Cell */}
+                              <td 
+                                className="py-2 px-3 border-r border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-brand-orange/5 transition-all"
+                                onDoubleClick={() => startEdit("date", e.date)}
+                              >
+                                {isEditing("date") ? (
+                                  <input 
+                                    type="date"
+                                    value={editingValue}
+                                    onChange={(evt) => setEditingValue(evt.target.value)}
+                                    onBlur={() => handleCellSave(e.createdTime, "date", editingValue)}
+                                    onKeyDown={(evt) => {
+                                      if (evt.key === "Enter") handleCellSave(e.createdTime, "date", editingValue);
+                                      if (evt.key === "Escape") setEditingCell(null);
+                                    }}
+                                    autoFocus
+                                    className="w-full bg-white dark:bg-slate-800 border border-brand-orange rounded px-1.5 py-0.5 focus:outline-none font-sans text-slate-900 dark:text-slate-55"
+                                  />
+                                ) : (
+                                  <span className="font-mono">{e.date}</span>
+                                )}
+                              </td>
+
+                              {/* Name Cell */}
+                              <td 
+                                className="py-2 px-3 border-r border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-brand-orange/5 transition-all font-medium"
+                                onDoubleClick={() => startEdit("name", e.name)}
+                              >
+                                {isEditing("name") ? (
+                                  <input 
+                                    type="text"
+                                    value={editingValue}
+                                    onChange={(evt) => setEditingValue(evt.target.value)}
+                                    onBlur={() => handleCellSave(e.createdTime, "name", editingValue)}
+                                    onKeyDown={(evt) => {
+                                      if (evt.key === "Enter") handleCellSave(e.createdTime, "name", editingValue);
+                                      if (evt.key === "Escape") setEditingCell(null);
+                                    }}
+                                    autoFocus
+                                    className="w-full bg-white dark:bg-slate-800 border border-brand-orange rounded px-1.5 py-0.5 focus:outline-none text-slate-900 dark:text-slate-55"
+                                  />
+                                ) : (
+                                  <span>{e.name || "Self"}</span>
+                                )}
+                              </td>
+
+                              {/* Type Cell */}
+                              <td 
+                                className="py-2 px-3 border-r border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-brand-orange/5 transition-all"
+                                onDoubleClick={() => startEdit("type", e.type)}
+                              >
+                                {isEditing("type") ? (
+                                  <select
+                                    value={editingValue}
+                                    onChange={(evt) => {
+                                      setEditingValue(evt.target.value);
+                                      handleCellSave(e.createdTime, "type", evt.target.value);
+                                    }}
+                                    onBlur={() => handleCellSave(e.createdTime, "type", editingValue)}
+                                    autoFocus
+                                    className="w-full bg-white dark:bg-slate-800 border border-brand-orange rounded px-1.5 py-0.5 focus:outline-none text-slate-900 dark:text-slate-55 text-xs"
+                                  >
+                                    <option value="Paid">Paid</option>
+                                    <option value="Received">Received</option>
+                                  </select>
+                                ) : (
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    e.type === "Paid" 
+                                      ? "bg-rose-500/10 text-rose-500 border border-rose-500/20" 
+                                      : "bg-emerald-500/10 text-emerald-500 border border-emerald-500/20"
+                                  }`}>
+                                    {e.type}
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* Amount Cell */}
+                              <td 
+                                className="py-2 px-3 border-r border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-brand-orange/5 transition-all"
+                                onDoubleClick={() => startEdit("amount", e.amount)}
+                              >
+                                {isEditing("amount") ? (
+                                  <input 
+                                    type="number"
+                                    value={editingValue}
+                                    onChange={(evt) => setEditingValue(evt.target.value)}
+                                    onBlur={() => handleCellSave(e.createdTime, "amount", editingValue)}
+                                    onKeyDown={(evt) => {
+                                      if (evt.key === "Enter") handleCellSave(e.createdTime, "amount", editingValue);
+                                      if (evt.key === "Escape") setEditingCell(null);
+                                    }}
+                                    autoFocus
+                                    className="w-full bg-white dark:bg-slate-800 border border-brand-orange rounded px-1.5 py-0.5 focus:outline-none font-mono text-slate-900 dark:text-slate-55"
+                                  />
+                                ) : (
+                                  <span className={`font-mono font-bold ${e.type === "Paid" ? "text-rose-500" : "text-emerald-500"}`}>
+                                    ₹ {e.amount}
+                                  </span>
+                                )}
+                              </td>
+
+                              {/* Description Cell */}
+                              <td 
+                                className="py-2 px-3 border-r border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-brand-orange/5 transition-all text-slate-500 dark:text-slate-400"
+                                onDoubleClick={() => startEdit("description", e.description)}
+                              >
+                                {isEditing("description") ? (
+                                  <input 
+                                    type="text"
+                                    value={editingValue}
+                                    onChange={(evt) => setEditingValue(evt.target.value)}
+                                    onBlur={() => handleCellSave(e.createdTime, "description", editingValue)}
+                                    onKeyDown={(evt) => {
+                                      if (evt.key === "Enter") handleCellSave(e.createdTime, "description", editingValue);
+                                      if (evt.key === "Escape") setEditingCell(null);
+                                    }}
+                                    autoFocus
+                                    className="w-full bg-white dark:bg-slate-800 border border-brand-orange rounded px-1.5 py-0.5 focus:outline-none text-slate-900 dark:text-slate-55"
+                                  />
+                                ) : (
+                                  <span>{e.description || "-"}</span>
+                                )}
+                              </td>
+
+                              {/* Actions Column */}
+                              <td className="py-2 px-3 text-center">
+                                {deleteConfirmRow === e.createdTime ? (
+                                  <div className="flex items-center justify-center gap-1.5 animate-fadeIn">
+                                    <button
+                                      onClick={() => handleDeleteRow(e.createdTime)}
+                                      className="text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 hover:text-rose-500 px-1.5 py-0.5 rounded text-[10px] font-bold border border-rose-500/20 transition-all"
+                                      title="Confirm Delete"
+                                    >
+                                      Yes
+                                    </button>
+                                    <button
+                                      onClick={() => setDeleteConfirmRow(null)}
+                                      className="text-slate-500 dark:text-slate-400 hover:bg-slate-500/10 px-1.5 py-0.5 rounded text-[10px] font-bold border border-slate-500/20 transition-all"
+                                      title="Cancel"
+                                    >
+                                      No
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button 
+                                    onClick={() => setDeleteConfirmRow(e.createdTime)}
+                                    className="text-slate-400 hover:text-rose-500 p-1 rounded-md hover:bg-rose-500/10 transition-all"
+                                    title="Delete Row"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 ) : (
+                  /* LIST VIEW MODE */
                   <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
                     {filteredEntries.map((e, idx) => (
                       <div 
@@ -1450,6 +2204,37 @@ export default function App() {
             >
               Got It
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Last Confirm Modal */}
+      {showDeleteLastConfirm && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-6 max-w-sm w-full shadow-2xl relative">
+            <h3 className="text-lg font-display font-bold mb-2 text-slate-900 dark:text-slate-100">
+              Delete Last Entry?
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-6">
+              Are you sure you want to delete the last entry in the spreadsheet? This action cannot be undone.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  handleDeleteLastEntry();
+                  setShowDeleteLastConfirm(false);
+                }}
+                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-semibold rounded-xl text-xs transition-all shadow-sm"
+              >
+                Yes, Delete
+              </button>
+              <button
+                onClick={() => setShowDeleteLastConfirm(false)}
+                className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 font-semibold rounded-xl text-xs transition-all border border-slate-200/50 dark:border-slate-800"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -36,6 +36,163 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Helper to convert Devanagari numerals to standard Western digits
+function convertDevanagariNumerals(text: string): string {
+  const devanagariDigits = ["०", "१", "२", "३", "४", "५", "६", "७", "८", "९"];
+  return text.split('').map(char => {
+    const idx = devanagariDigits.indexOf(char);
+    return idx !== -1 ? String(idx) : char;
+  }).join('');
+}
+
+// Ultra-robust amount extractor from mixed language/spoken text
+function extractAmountFromText(text: string): number | null {
+  const cleanText = convertDevanagariNumerals(text).toLowerCase();
+  const words = cleanText.split(/[\s,।.?!]+/);
+
+  const numberMap: { [key: string]: number } = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+    "ek": 1, "do": 2, "don": 2, "teen": 3, "char": 4, "paach": 5, "pach": 5, "saha": 6, "saat": 7, "aath": 8, "nau": 9, "no": 9, "das": 10, "dah": 10,
+    "vis": 20, "bees": 20, "tees": 30, "chalis": 40, "pannas": 50,
+    "एक": 1, "दोन": 2, "तीन": 3, "चार": 4, "पाच": 5, "सहा": 6, "सात": 7, "आठ": 8, "नऊ": 9, "दहा": 10,
+    "वीस": 20, "तीस": 30, "चाळीस": 40, "पन्नास": 50, "शंभर": 100, "सौ": 100, "sau": 100, "so": 100
+  };
+
+  const multipliers: { [key: string]: number } = {
+    "thousand": 1000, "hazar": 1000, "hazaar": 1000, "हजार": 1000,
+    "hundred": 100, "shambhar": 100, "शंभर": 100, "सौ": 100,
+    "lakh": 100000, "lakha": 100000, "lac": 100000, "लाख": 100000
+  };
+
+  let currentVal = 0;
+  let totalVal = 0;
+  let foundAny = false;
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+
+    if (/^\d+(\.\d+)?$/.test(word)) {
+      const num = parseFloat(word);
+      currentVal = num;
+      foundAny = true;
+      continue;
+    }
+
+    if (numberMap[word] !== undefined) {
+      currentVal += numberMap[word];
+      foundAny = true;
+      continue;
+    }
+
+    if (multipliers[word] !== undefined) {
+      const mult = multipliers[word];
+      if (currentVal === 0) {
+        currentVal = 1;
+      }
+      totalVal += currentVal * mult;
+      currentVal = 0;
+      foundAny = true;
+      continue;
+    }
+  }
+
+  totalVal += currentVal;
+
+  if (foundAny && totalVal > 0) {
+    return totalVal;
+  }
+
+  const digits = cleanText.match(/\d+(\.\d+)?/);
+  if (digits) {
+    return parseFloat(digits[0]);
+  }
+
+  return null;
+}
+
+// Ultra-robust rule-based fallback parser for English, Hindi, and Marathi transactions
+function parseVoiceFallback(text: string, currentLocalDate: string): any {
+  const cleanText = convertDevanagariNumerals(text).toLowerCase();
+
+  // 1. Detect language
+  let detectedLanguage = "English";
+  const marathiClues = ["dile", "ghetle", "rupaye", "rupaya", "rupya", "dila", "ghetla", "ale", "ala", "दिले", "घेतले", "रुपये", "रुपया", "आले", "मिळाले", "ला"];
+  const hindiClues = ["diye", "liye", "diya", "liya", "rupay", "rupee", "ko", "ne", "mili", "mila", "mile", "दिए", "लिए", "दिया", "लिया", "रुपए", "रुपया", "मिले", "मिला", "को"];
+  
+  const marathiScore = marathiClues.filter(clue => cleanText.includes(clue)).length;
+  const hindiScore = hindiClues.filter(clue => cleanText.includes(clue)).length;
+
+  if (marathiScore > 0 && marathiScore >= hindiScore) {
+    detectedLanguage = "Marathi";
+  } else if (hindiScore > 0 && hindiScore > marathiScore) {
+    detectedLanguage = "Hindi";
+  } else if (/[\u0900-\u097F]/.test(text)) {
+    detectedLanguage = "Marathi";
+  }
+
+  // 2. Extract Type (Paid vs Received)
+  let type: "Paid" | "Received" = "Paid"; // Default
+  const paidWords = ["paid", "spent", "gave", "sent", "send", "transfer", "pay", "given", "dile", "dilya", "dilele", "dila", "dele", "deun", "दिले", "दिला", "द्या", "पाठवले", "diye", "diya", "de", "diye hai", "दिए", "दिया", "भेजा", "dileli"];
+  const receivedWords = ["received", "got", "took", "taken", "gained", "earn", "credit", "credited", "deposit", "ghetle", "ghetla", "ale", "ala", "ghetale", "मिळाले", "घेतले", "घेतला", "आले", "liye", "liya", "mile", "mila", "mili", "प्राप्त", "लिए", "लिया", "मिले", "मिला", "milale"];
+
+  let paidScore = paidWords.filter(word => cleanText.includes(word)).length;
+  let receivedScore = receivedWords.filter(word => cleanText.includes(word)).length;
+
+  if (receivedScore > paidScore) {
+    type = "Received";
+  }
+
+  // 3. Extract Amount using our robust helper
+  const amount = extractAmountFromText(text);
+
+  // 4. Extract Name
+  const stopWords = new Set([
+    "i", "you", "he", "she", "they", "we", "paid", "received", "spent", "gave", "sent", "send", "transfer", "pay", "given",
+    "dile", "dilya", "dilele", "dila", "dele", "deun", "दिले", "दिला", "द्या", "पाठवले", "diye", "diya", "de", "diye hai", "दिए", "दिया", "भेजा",
+    "received", "got", "took", "taken", "gained", "earn", "credit", "credited", "deposit", "ghetle", "ghetla", "ale", "ala", "ghetale",
+    "मिळाले", "घेतले", "घेतला", "आले", "liye", "liya", "mile", "mila", "mili", "प्राप्त", "लिए", "लिया", "मिले", "मिला",
+    "rupaye", "rupaya", "rupya", "rupay", "rupee", "rupees", "रुपये", "रुपया", "रुपए", "rs", "inr",
+    "la", "ko", "ne", "se", "laa", "koo", "ला", "को", "ने", "से", "for", "to", "from", "on", "in", "and", "a", "the",
+    "last", "row", "delete", "remove", "add", "save", "yes", "no", "okay", "ok", "confirm", "with",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "hundred", "thousand", "lakh", "lac",
+    "एक", "दोन", "तीन", "चार", "पाच", "सहा", "सात", "आठ", "नऊ", "दहा", "शंभर", "हजार", "लाख"
+  ]);
+
+  const words = text.split(/[\s,।.?!]+/).filter(w => w.length > 0);
+  let name = "";
+  for (const w of words) {
+    const wClean = w.toLowerCase();
+    if (/\d/.test(wClean) || stopWords.has(wClean) || wClean.length <= 1) {
+      continue;
+    }
+    let cleanName = w;
+    if (cleanName.toLowerCase().endsWith("la") && cleanName.length > 4) {
+      cleanName = cleanName.substring(0, cleanName.length - 2);
+    }
+    if (cleanName.toLowerCase().endsWith("ko") && cleanName.length > 4) {
+      cleanName = cleanName.substring(0, cleanName.length - 2);
+    }
+    name = cleanName;
+    break;
+  }
+
+  if (!name) {
+    name = "Self";
+  }
+
+  return {
+    name: name,
+    amount: amount,
+    date: currentLocalDate,
+    type: type,
+    description: "Voice Fallback",
+    amountMissing: amount === null,
+    detectedLanguage: detectedLanguage
+  };
+}
+
 // API: Parse spoken natural language into structured JSON using Gemini
 app.post("/api/parse-voice", async (req, res) => {
   try {
@@ -99,27 +256,34 @@ app.post("/api/parse-voice", async (req, res) => {
 
     const prompt = `Analyze this spoken text and return structured JSON: "${text}"`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema,
-        temperature: 0.1,
-      },
-    });
+    let structuredData;
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3.5-flash",
+        contents: prompt,
+        config: {
+          systemInstruction,
+          responseMimeType: "application/json",
+          responseSchema,
+          temperature: 0.1,
+        },
+      });
 
-    const resultText = response.text;
-    if (!resultText) {
-      throw new Error("Empty response from Gemini model");
+      const resultText = response.text;
+      if (!resultText) {
+        throw new Error("Empty response from Gemini model");
+      }
+      structuredData = JSON.parse(resultText.trim());
+    } catch (geminiError: any) {
+      console.warn("Gemini parsing failed or quota exceeded, running fallback parser:", geminiError);
+      // Run the robust Indian-languages regex/rule-based parser
+      structuredData = parseVoiceFallback(text, currentLocalDate);
     }
 
-    const structuredData = JSON.parse(resultText.trim());
     res.json(structuredData);
   } catch (error: any) {
-    console.error("Gemini Parsing Error:", error);
-    res.status(500).json({ error: error.message || "Failed to parse voice text with Gemini" });
+    console.error("Gemini/Fallback Parsing Error:", error);
+    res.status(500).json({ error: error.message || "Failed to parse voice text" });
   }
 });
 
