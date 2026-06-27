@@ -1,0 +1,6 @@
+{
+  "name": "Unified Infracon",
+  "description": "AI-powered Voice Data Entry Web Application that automatically converts natural spoken language in Marathi, Hindi, or English into structured transactions saved directly to Google Sheets.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
