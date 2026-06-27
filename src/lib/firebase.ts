@@ -38,6 +38,11 @@ export const initAuth = (
           cachedAccessToken = localToken;
           if (onAuthSuccess) onAuthSuccess(user, localToken);
         } else {
+          // Firebase thinks user is signed in, but we have no Google Access Token.
+          // Sign out of Firebase to sync state. This will trigger onAuthStateChanged(null).
+          await signOut(auth);
+          cachedAccessToken = null;
+          localStorage.removeItem("google_access_token");
           if (onAuthFailure) onAuthFailure();
         }
       }

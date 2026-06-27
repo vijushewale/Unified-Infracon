@@ -140,6 +140,27 @@ export default function App() {
     }
   }, [sheetUrl]);
 
+  // Synchronize authentication tokens and state across tabs/iframes instantly when localStorage changes
+  useEffect(() => {
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === "google_access_token") {
+        const tokenVal = e.newValue;
+        if (tokenVal) {
+          // If a new token was saved on another tab (e.g. after a secure top-level popup login),
+          // reload the page to completely re-authenticate in this iframe without popup blocking!
+          window.location.reload();
+        } else {
+          // If token was cleared, reset authentication state
+          setUser(null);
+          setToken(null);
+          setNeedsAuth(true);
+        }
+      }
+    };
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
   // Handle Sheet Connection once authenticated
   useEffect(() => {
     if (token && !needsAuth) {
@@ -209,8 +230,19 @@ export default function App() {
         showSuccess("Logged in successfully!");
       }
     } catch (err: any) {
-      console.error(err);
-      showError("Sign in failed. Popups might be blocked by your browser. Click 'Open App in New Tab' to sign in securely!");
+      console.error("Login Error details:", err);
+      const errorCode = err?.code || "unknown-error";
+      const errorMessage = err?.message || err?.toString() || "No detailed error message provided.";
+      
+      let friendlyMsg = `Sign in failed: ${errorMessage} (${errorCode})`;
+      if (errorCode === "auth/popup-blocked") {
+        friendlyMsg = "Sign in popup was blocked by your browser. Please allow popups or click 'Open App in New Tab' below to sign in.";
+      } else if (errorCode === "auth/operation-not-allowed") {
+        friendlyMsg = "Google Sign-In is not enabled in your Firebase Console. Please go to Firebase Console > Authentication > Sign-in method and enable Google.";
+      } else if (errorCode === "auth/unauthorized-domain") {
+        friendlyMsg = "This domain is not authorized in your Firebase Console under Authentication > Settings > Authorized domains.";
+      }
+      showError(friendlyMsg);
     } finally {
       setIsLoggingIn(false);
     }
