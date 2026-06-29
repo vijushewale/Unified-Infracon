@@ -12,15 +12,25 @@ const PORT = 3000;
 // Middleware for JSON parsing
 app.use(express.json());
 
-// Initialize Gemini client (server-side only)
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
-  },
-});
+// Initialize Gemini client lazily (server-side only)
+let ai: GoogleGenAI | null = null;
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return null;
+  }
+  if (!ai) {
+    ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return ai;
+}
 
 // Helper: Extract bearer token from Authorization header
 const getAuthToken = (req: express.Request): string | null => {
@@ -257,27 +267,33 @@ app.post("/api/parse-voice", async (req, res) => {
     const prompt = `Analyze this spoken text and return structured JSON: "${text}"`;
 
     let structuredData;
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
-        config: {
-          systemInstruction,
-          responseMimeType: "application/json",
-          responseSchema,
-          temperature: 0.1,
-        },
-      });
-
-      const resultText = response.text;
-      if (!resultText) {
-        throw new Error("Empty response from Gemini model");
-      }
-      structuredData = JSON.parse(resultText.trim());
-    } catch (geminiError: any) {
-      console.warn("Gemini parsing failed or quota exceeded, running fallback parser:", geminiError);
-      // Run the robust Indian-languages regex/rule-based parser
+    const client = getGeminiClient();
+    if (!client) {
+      console.warn("GEMINI_API_KEY is not defined. Running robust rule-based fallback parser.");
       structuredData = parseVoiceFallback(text, currentLocalDate);
+    } else {
+      try {
+        const response = await client.models.generateContent({
+          model: "gemini-3.5-flash",
+          contents: prompt,
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema,
+            temperature: 0.1,
+          },
+        });
+
+        const resultText = response.text;
+        if (!resultText) {
+          throw new Error("Empty response from Gemini model");
+        }
+        structuredData = JSON.parse(resultText.trim());
+      } catch (geminiError: any) {
+        console.warn("Gemini parsing failed or quota exceeded, running fallback parser:", geminiError);
+        // Run the robust Indian-languages regex/rule-based parser
+        structuredData = parseVoiceFallback(text, currentLocalDate);
+      }
     }
 
     res.json(structuredData);
