@@ -43,26 +43,33 @@ const getAuthToken = (req: express.Request): string | null => {
 
 // Helper: Get properties of the first worksheet dynamically to handle localization and renaming
 async function getFirstSheetProperties(spreadsheetId: string, token: string): Promise<{ sheetId: number; title: string }> {
-  const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
-  const metaRes = await fetch(metaUrl, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  try {
+    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
+    const metaRes = await fetch(metaUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
 
-  if (!metaRes.ok) {
-    const errText = await metaRes.text();
-    throw new Error(`Failed to fetch spreadsheet metadata: ${errText}`);
+    if (!metaRes.ok) {
+      const errText = await metaRes.text();
+      console.warn(`Failed to fetch spreadsheet metadata, falling back to Sheet1: ${errText}`);
+      return { sheetId: 0, title: "Sheet1" };
+    }
+
+    const metaData: any = await metaRes.json();
+    const firstSheet = metaData.sheets?.[0]?.properties;
+    if (!firstSheet) {
+      console.warn("No worksheets found in metadata, falling back to Sheet1");
+      return { sheetId: 0, title: "Sheet1" };
+    }
+
+    return {
+      sheetId: firstSheet.sheetId ?? 0,
+      title: firstSheet.title || "Sheet1",
+    };
+  } catch (error) {
+    console.error("Error in getFirstSheetProperties, falling back to Sheet1:", error);
+    return { sheetId: 0, title: "Sheet1" };
   }
-
-  const metaData: any = await metaRes.json();
-  const firstSheet = metaData.sheets?.[0]?.properties;
-  if (!firstSheet) {
-    throw new Error("No worksheets found in this spreadsheet.");
-  }
-
-  return {
-    sheetId: firstSheet.sheetId ?? 0,
-    title: firstSheet.title || "Sheet1",
-  };
 }
 
 // API: Health check
