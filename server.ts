@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -215,34 +215,34 @@ app.post("/api/parse-voice", async (req, res) => {
 
     // Define the JSON schema for the transaction
     const responseSchema = {
-      type: Type.OBJECT,
+      type: "OBJECT",
       properties: {
         name: {
-          type: Type.STRING,
+          type: "STRING",
           description: "The name of the person involved in the transaction. If no person is specified, leave empty.",
         },
         amount: {
-          type: Type.NUMBER,
+          type: "NUMBER",
           description: "The numeric amount of the transaction. If amount is missing or not spoken, return null.",
         },
         date: {
-          type: Type.STRING,
+          type: "STRING",
           description: `The date of the transaction in YYYY-MM-DD format. If a specific date is spoken (e.g. '26 May 2024'), parse it. If no date is spoken, default exactly to: ${currentLocalDate}.`,
         },
         type: {
-          type: Type.STRING,
+          type: "STRING",
           description: "Whether money was 'Paid' (given/sent/dile/diye/spent/paid) or 'Received' (taken/got/ghetle/liye/received/gained). Must be exactly 'Paid' or 'Received'.",
         },
         description: {
-          type: Type.STRING,
+          type: "STRING",
           description: "A short, descriptive note of what the transaction was for. E.g. 'Payment', 'Borrow', 'Return', etc. If nothing specific, use 'Voice Entry'.",
         },
         amountMissing: {
-          type: Type.BOOLEAN,
+          type: "BOOLEAN",
           description: "Set to true if the transaction amount is not mentioned or missing in the text.",
         },
         detectedLanguage: {
-          type: Type.STRING,
+          type: "STRING",
           description: "The language detected in the input (e.g., 'Marathi', 'Hindi', 'English', 'Mixed').",
         }
       },

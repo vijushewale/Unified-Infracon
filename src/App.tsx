@@ -103,19 +103,46 @@ export default function App() {
     return null;
   });
 
-  // Auth State (Mocked to retain compatibility)
-  const [user] = useState<any>(null);
-  const [token] = useState<string | null>(null);
-  const needsAuth = !activeProfile;
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
-  const isOfflineMode = true; // Always in local database mode now
-
   // Sheets Config State
   const [spreadsheetId, setSpreadsheetId] = useState<string | null>(() => localStorage.getItem("sheet_id"));
   const [sheetUrl, setSheetUrl] = useState<string | null>(() => localStorage.getItem("sheet_url"));
   const [isEnsuringSheet, setIsEnsuringSheet] = useState(false);
   const [entries, setEntries] = useState<TransactionEntry[]>([]);
   const [isLoadingEntries, setIsLoadingEntries] = useState(false);
+
+  // Auth State (Dynamic to allow Google Sheets sync)
+  const [user, setUser] = useState<any>(null);
+  const [token, setToken] = useState<string | null>(null);
+  const needsAuth = !activeProfile;
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isOfflineMode, setIsOfflineMode] = useState<boolean>(() => {
+    const val = localStorage.getItem("is_offline_mode");
+    return val === "false" ? false : true;
+  });
+
+  // Sync offline mode preference
+  useEffect(() => {
+    localStorage.setItem("is_offline_mode", String(isOfflineMode));
+  }, [isOfflineMode]);
+
+  // Initialize Google Auth connection
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (googleUser: any, googleToken: string) => {
+        setUser(googleUser);
+        setToken(googleToken);
+        const mode = localStorage.getItem("is_offline_mode");
+        if (mode === "false") {
+          fetchSheetEntries(false, googleToken, spreadsheetId);
+        }
+      },
+      () => {
+        setUser(null);
+        setToken(null);
+      }
+    );
+    return () => unsubscribe();
+  }, [spreadsheetId]);
 
   // Recognition / Voice State
   const [isListening, setIsListening] = useState(false);
@@ -213,15 +240,51 @@ export default function App() {
     }
   }, [sheetUrl]);
 
-  // Fetch entries from local storage if offline
-  const fetchSheetEntries = async () => {
-    const stored = localStorage.getItem("offline_entries");
-    if (stored) {
-      try {
-        setEntries(JSON.parse(stored));
-      } catch (e) {
+  // Fetch entries from local storage or Google Sheets
+  const fetchSheetEntries = async (currentOfflineMode = isOfflineMode, currentToken = token, currentSheetId = spreadsheetId) => {
+    setIsLoadingEntries(true);
+    if (currentOfflineMode || !currentToken || !currentSheetId) {
+      const stored = localStorage.getItem("offline_entries");
+      if (stored) {
+        try {
+          setEntries(JSON.parse(stored));
+        } catch (e) {
+          setEntries([]);
+        }
+      } else {
         setEntries([]);
       }
+      setIsLoadingEntries(false);
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/sheets/list?spreadsheetId=${currentSheetId}`, {
+        headers: {
+          Authorization: `Bearer ${currentToken}`,
+        },
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to fetch ledger rows from Google Sheet");
+      }
+
+      const data = await res.json();
+      if (data.entries) {
+        setEntries(data.entries);
+        localStorage.setItem("offline_entries", JSON.stringify(data.entries)); // Cache entries offline too
+      }
+    } catch (err: any) {
+      console.error("Fetch Sheet Entries Error:", err);
+      showError("Failed to fetch from Google Sheets. Using local backup.");
+      const stored = localStorage.getItem("offline_entries");
+      if (stored) {
+        try {
+          setEntries(JSON.parse(stored));
+        } catch (e) {}
+      }
+    } finally {
+      setIsLoadingEntries(false);
     }
   };
 
@@ -281,11 +344,79 @@ export default function App() {
     }
   };
 
-  const ensureGoogleSheet = async () => {
-    // No-op in local credentials mode
+  const ensureGoogleSheet = async (authToken = token) => {
+    if (!authToken) {
+      showError("Please connect your Google Account first!");
+      return;
+    }
+    setIsEnsuringSheet(true);
+    try {
+      const res = await fetch("/api/sheets/ensure-sheet", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || "Failed to find or create spreadsheet.");
+      }
+
+      const data = await res.json();
+      setSpreadsheetId(data.spreadsheetId);
+      setSheetUrl(data.url);
+      showSuccess(data.newlyCreated ? "Created 'Unified Infracon' Spreadsheet!" : "Connected to Google Spreadsheet!");
+      return data;
+    } catch (err: any) {
+      console.error(err);
+      showError("Failed to configure Google Sheet: " + (err.message || "Unknown error"));
+    } finally {
+      setIsEnsuringSheet(false);
+    }
   };
 
-  // Logout handler
+  // Google OAuth Handlers
+  const handleGoogleSignIn = async () => {
+    setIsLoggingIn(true);
+    try {
+      const result = await googleSignIn();
+      if (result) {
+        setUser(result.user);
+        setToken(result.accessToken);
+        showSuccess(`Google Sign-In successful!`);
+        
+        // Ensure Google Sheet exists or create it
+        const sheetData = await ensureGoogleSheet(result.accessToken);
+        
+        // Disable offline mode to begin syncing
+        setIsOfflineMode(false);
+        localStorage.setItem("is_offline_mode", "false");
+        
+        if (sheetData) {
+          fetchSheetEntries(false, result.accessToken, sheetData.spreadsheetId);
+        }
+      }
+    } catch (err: any) {
+      console.error(err);
+      showError("Google Sign-In failed or was closed.");
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogoutGoogle = async () => {
+    await logout();
+    setUser(null);
+    setToken(null);
+    setIsOfflineMode(true);
+    localStorage.setItem("is_offline_mode", "true");
+    fetchSheetEntries(true, null, null);
+    showSuccess("Google Sheets disconnected successfully.");
+  };
+
+  // Logout handler for local offline profile
   const handleLogout = async () => {
     setActiveProfile(null);
     localStorage.removeItem("active_profile");
@@ -293,19 +424,10 @@ export default function App() {
     showSuccess("Logged out successfully.");
   };
 
-  // Fetch entries from local storage on mount and when activeProfile changes
+  // Fetch entries from local storage or Google Sheets on mount and when states change
   useEffect(() => {
-    const stored = localStorage.getItem("offline_entries");
-    if (stored) {
-      try {
-        setEntries(JSON.parse(stored));
-      } catch (e) {
-        setEntries([]);
-      }
-    } else {
-      setEntries([]);
-    }
-  }, [activeProfile]);
+    fetchSheetEntries();
+  }, [activeProfile, isOfflineMode, token, spreadsheetId]);
 
   // Keep assistant instructions updated with latest state
   useEffect(() => {
@@ -1444,6 +1566,88 @@ export default function App() {
                       />
                       <div className="w-9 h-5 bg-slate-200 dark:bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-brand-orange"></div>
                     </label>
+                  </div>
+
+                  {/* Google Sheets Sync Controller */}
+                  <div className="border-t border-slate-200/50 dark:border-slate-800/50 pt-2.5 mt-2.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block">
+                          Google Sheets Sync Status
+                        </span>
+                        <span className="text-[10px] text-slate-400 dark:text-slate-500 block">
+                          गुगल शीट मध्ये सिंक करा (Cloud Sync)
+                        </span>
+                      </div>
+                      {token ? (
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input 
+                            type="checkbox" 
+                            checked={!isOfflineMode} 
+                            onChange={(e) => {
+                              const turnOnSheets = e.target.checked;
+                              setIsOfflineMode(!turnOnSheets);
+                              localStorage.setItem("is_offline_mode", String(!turnOnSheets));
+                              fetchSheetEntries(!turnOnSheets, token, spreadsheetId);
+                              if (turnOnSheets) {
+                                showSuccess("Google Sheets Sync Active!");
+                              } else {
+                                showSuccess("Switched to Local Offline database.");
+                              }
+                            }} 
+                            className="sr-only peer" 
+                          />
+                          <div className="w-9 h-5 bg-slate-200 dark:bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-emerald-600"></div>
+                        </label>
+                      ) : (
+                        <span className="text-[10px] bg-slate-100 dark:bg-slate-900 text-slate-400 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-850 font-mono">
+                          Offline
+                        </span>
+                      )}
+                    </div>
+
+                    {!token ? (
+                      <button
+                        onClick={handleGoogleSignIn}
+                        disabled={isLoggingIn}
+                        className="w-full mt-1.5 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-sm transition-all hover:scale-[1.01]"
+                      >
+                        <FileSpreadsheet className="h-4 w-4" />
+                        <span>{isLoggingIn ? "Connecting Google..." : "Connect Google Sheets Ledger"}</span>
+                      </button>
+                    ) : (
+                      <div className="bg-slate-100 dark:bg-slate-900 p-2 rounded-xl border border-slate-200 dark:border-slate-800 text-[10px] space-y-1 text-slate-500 dark:text-slate-400">
+                        <div className="flex justify-between">
+                          <span>User: {user?.email || "Connected"}</span>
+                          <button 
+                            onClick={handleLogoutGoogle}
+                            className="text-rose-500 hover:underline font-semibold"
+                          >
+                            Disconnect
+                          </button>
+                        </div>
+                        {spreadsheetId ? (
+                          <div className="flex justify-between items-center text-[9px] font-mono bg-white dark:bg-black p-1 px-1.5 rounded-lg border border-slate-150 dark:border-slate-850">
+                            <span className="truncate max-w-[160px]">Sheet ID: {spreadsheetId}</span>
+                            <button 
+                              onClick={() => ensureGoogleSheet(token)}
+                              disabled={isEnsuringSheet}
+                              className="text-emerald-500 hover:underline font-semibold shrink-0"
+                            >
+                              {isEnsuringSheet ? "Syncing..." : "Re-sync"}
+                            </button>
+                          </div>
+                        ) : (
+                          <button 
+                            onClick={() => ensureGoogleSheet(token)}
+                            disabled={isEnsuringSheet}
+                            className="w-full mt-1 py-1 px-2 bg-emerald-600/10 text-emerald-600 hover:bg-emerald-600/20 border border-emerald-600/25 rounded-lg font-semibold"
+                          >
+                            {isEnsuringSheet ? "Creating Sheet..." : "Create Spreadsheet"}
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 
