@@ -78,6 +78,163 @@ interface OfflineProfile {
   avatarColor: string;
 }
 
+// Helper to convert Devanagari numerals to standard Western digits
+function convertDevanagariNumeralsClient(text: string): string {
+  const devanagariDigits = ["०", "१", "२", "३", "४", "५", "६", "७", "८", "९"];
+  return text.split('').map(char => {
+    const idx = devanagariDigits.indexOf(char);
+    return idx !== -1 ? String(idx) : char;
+  }).join('');
+}
+
+// Robust amount extractor from mixed language/spoken text
+function extractAmountFromTextClient(text: string): number | null {
+  const cleanText = convertDevanagariNumeralsClient(text).toLowerCase();
+  const words = cleanText.split(/[\s,।.?!]+/);
+
+  const numberMap: { [key: string]: number } = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+    "ek": 1, "do": 2, "don": 2, "teen": 3, "char": 4, "paach": 5, "pach": 5, "saha": 6, "saat": 7, "aath": 8, "nau": 9, "no": 9, "das": 10, "dah": 10,
+    "vis": 20, "bees": 20, "tees": 30, "chalis": 40, "pannas": 50,
+    "एक": 1, "दोन": 2, "तीन": 3, "चार": 4, "पाच": 5, "सहा": 6, "सात": 7, "आठ": 8, "नऊ": 9, "दहा": 10,
+    "वीस": 20, "तीस": 30, "चाळीस": 40, "पन्नास": 50, "शंभर": 100, "सौ": 100, "sau": 100, "so": 100
+  };
+
+  const multipliers: { [key: string]: number } = {
+    "thousand": 1000, "hazar": 1000, "hazaar": 1000, "हजार": 1000,
+    "hundred": 100, "shambhar": 100, "शंभर": 100, "सौ": 100,
+    "lakh": 100000, "lakha": 100000, "lac": 100000, "लाख": 100000
+  };
+
+  let currentVal = 0;
+  let totalVal = 0;
+  let foundAny = false;
+
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+
+    if (/^\d+(\.\d+)?$/.test(word)) {
+      const num = parseFloat(word);
+      currentVal = num;
+      foundAny = true;
+      continue;
+    }
+
+    if (numberMap[word] !== undefined) {
+      currentVal += numberMap[word];
+      foundAny = true;
+      continue;
+    }
+
+    if (multipliers[word] !== undefined) {
+      const mult = multipliers[word];
+      if (currentVal === 0) {
+        currentVal = 1;
+      }
+      totalVal += currentVal * mult;
+      currentVal = 0;
+      foundAny = true;
+      continue;
+    }
+  }
+
+  totalVal += currentVal;
+
+  if (foundAny && totalVal > 0) {
+    return totalVal;
+  }
+
+  const digits = cleanText.match(/\d+(\.\d+)?/);
+  if (digits) {
+    return parseFloat(digits[0]);
+  }
+
+  return null;
+}
+
+// Rule-based voice parser on client side
+function parseVoiceFallbackClient(text: string, currentLocalDate: string): ParsedTransaction {
+  const cleanText = convertDevanagariNumeralsClient(text).toLowerCase();
+
+  // 1. Detect language
+  let detectedLanguage = "English";
+  const marathiClues = ["dile", "ghetle", "rupaye", "rupaya", "rupya", "dila", "ghetla", "ale", "ala", "दिले", "घेतले", "रुपये", "रुपया", "आले", "मिळाले", "ला"];
+  const hindiClues = ["diye", "liye", "diya", "liya", "rupay", "rupee", "ko", "ne", "mili", "mila", "mile", "दिए", "लिए", "दिया", "लिया", "रुपए", "रुपया", "मिले", "मिला", "को"];
+  
+  const marathiScore = marathiClues.filter(clue => cleanText.includes(clue)).length;
+  const hindiScore = hindiClues.filter(clue => cleanText.includes(clue)).length;
+
+  if (marathiScore > 0 && marathiScore >= hindiScore) {
+    detectedLanguage = "Marathi";
+  } else if (hindiScore > 0 && hindiScore > marathiScore) {
+    detectedLanguage = "Hindi";
+  } else if (/[\u0900-\u097F]/.test(text)) {
+    detectedLanguage = "Marathi";
+  }
+
+  // 2. Extract Type (Paid vs Received)
+  let type: "Paid" | "Received" = "Paid"; // Default
+  const paidWords = ["paid", "spent", "gave", "sent", "send", "transfer", "pay", "given", "dile", "dilya", "dilele", "dila", "dele", "deun", "दिले", "दिला", "द्या", "पाठवले", "diye", "diya", "de", "diye hai", "दिए", "दिया", "भेजा", "dileli"];
+  const receivedWords = ["received", "got", "took", "taken", "gained", "earn", "credit", "credited", "deposit", "ghetle", "ghetla", "ale", "ala", "ghetale", "मिळाले", "घेतले", "घेतला", "आले", "liye", "liya", "mile", "mila", "mili", "प्राप्त", "लिए", "लिया", "मिले", "मिला", "milale"];
+
+  let paidScore = paidWords.filter(word => cleanText.includes(word)).length;
+  let receivedScore = receivedWords.filter(word => cleanText.includes(word)).length;
+
+  if (receivedScore > paidScore) {
+    type = "Received";
+  }
+
+  // 3. Extract Amount using our robust helper
+  const amount = extractAmountFromTextClient(text);
+
+  // 4. Extract Name
+  const stopWords = new Set([
+    "i", "you", "he", "she", "they", "we", "paid", "received", "spent", "gave", "sent", "send", "transfer", "pay", "given",
+    "dile", "dilya", "dilele", "dila", "dele", "deun", "दिले", "दिला", "द्या", "पाठवले", "diye", "diya", "de", "diye hai", "दिए", "दिया", "भेजा",
+    "received", "got", "took", "taken", "gained", "earn", "credit", "credited", "deposit", "ghetle", "ghetla", "ale", "ala", "ghetale",
+    "मिळाले", "घेतले", "घेतला", "आले", "liye", "liya", "mile", "mila", "mili", "प्राप्त", "लिए", "लिया", "मिले", "मिला",
+    "rupaye", "rupaya", "rupya", "rupay", "rupee", "rupees", "रुपये", "रुपया", "रुपए", "rs", "inr",
+    "la", "ko", "ne", "se", "laa", "koo", "ला", "को", "ने", "से", "for", "to", "from", "on", "in", "and", "a", "the",
+    "last", "row", "delete", "remove", "add", "save", "yes", "no", "okay", "ok", "confirm", "with",
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "hundred", "thousand", "lakh", "lac",
+    "एक", "दोन", "तीन", "चार", "पाच", "सहा", "सात", "आठ", "नऊ", "दहा", "शंभर", "हजार", "लाख"
+  ]);
+
+  const words = text.split(/[\s,।.?!]+/).filter(w => w.length > 0);
+  let name = "";
+  for (const w of words) {
+    const wClean = w.toLowerCase();
+    if (/\d/.test(wClean) || stopWords.has(wClean) || wClean.length <= 1) {
+      continue;
+    }
+    let cleanName = w;
+    if (cleanName.toLowerCase().endsWith("la") && cleanName.length > 4) {
+      cleanName = cleanName.substring(0, cleanName.length - 2);
+    }
+    if (cleanName.toLowerCase().endsWith("ko") && cleanName.length > 4) {
+      cleanName = cleanName.substring(0, cleanName.length - 2);
+    }
+    name = cleanName;
+    break;
+  }
+
+  if (!name) {
+    name = "Self";
+  }
+
+  return {
+    name: name,
+    amount: amount,
+    date: currentLocalDate,
+    type: type,
+    description: "Voice Entry",
+    amountMissing: amount === null,
+    detectedLanguage: detectedLanguage
+  };
+}
+
 export default function App() {
   // Local/Offline Profile State
   const [profiles, setProfiles] = useState<OfflineProfile[]>(() => {
@@ -769,8 +926,41 @@ export default function App() {
         }
       }
     } catch (err: any) {
-      console.error(err);
-      showError("Gemini analysis failed. Please try speaking again.");
+      console.warn("Backend parse failed, using offline fallback parser:", err);
+      try {
+        const todayStr = new Date().toISOString().split("T")[0];
+        const data = parseVoiceFallbackClient(textToParse, todayStr);
+        setParsedTransaction(data);
+        
+        showSuccess("Using client-side offline voice parser.");
+
+        if (data.amountMissing) {
+          speak(data.detectedLanguage === "Marathi" 
+            ? `मला ${data.name || "सेल्फ"} कडून व्यवहाराची माहिती मिळाली, पण रक्कम किती आहे?` 
+            : data.detectedLanguage === "Hindi" 
+              ? `${data.name || "सेल्फ"} के लेनदेन में राशि नहीं मिली। कृपया राशि दर्ज करें।` 
+              : `Transaction found for ${data.name || "Self"} but the amount is missing. Please state the amount.`);
+        } else {
+          if (autoSubmit) {
+            let autoMsg = "";
+            if (data.detectedLanguage === "Marathi" || voiceLang === "mr-IN") {
+              autoMsg = `व्यवहार मिळाला. गुगल शीट मध्ये थेट सेव्ह करत आहे.`;
+            } else if (data.detectedLanguage === "Hindi" || voiceLang === "hi-IN") {
+              autoMsg = `लेनदेन मिल गया है। इसे सीधे शीट में सहेज रहे हैं।`;
+            } else {
+              autoMsg = `Transaction recognized. Automatically saving to spreadsheet...`;
+            }
+            speak(autoMsg);
+            await saveTransactionDirectly(data);
+          } else {
+            setWaitingForConfirmation(true);
+            triggerConfirmationSpeech(data);
+          }
+        }
+      } catch (fallbackErr: any) {
+        console.error("Fallback parsing failed:", fallbackErr);
+        showError("Gemini analysis failed. Please try speaking again.");
+      }
     } finally {
       setIsParsing(false);
     }
@@ -1058,20 +1248,7 @@ export default function App() {
               <HelpCircle className="h-5 w-5" />
             </button>
 
-            {/* Google Sheets Live Link */}
-            {sheetUrl && (
-              <a 
-                href={sheetUrl} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600/10 text-emerald-600 hover:bg-emerald-600/20 border border-emerald-600/30 rounded-xl font-medium transition-all text-sm"
-                title="View Google Sheet"
-                id="view-sheet-btn"
-              >
-                <FileSpreadsheet className="h-4 w-4" />
-                <span className="hidden md:inline">Open Spreadsheet</span>
-              </a>
-            )}
+            {/* Google Sheets Live Link removed */}
 
             {/* User Logged-in profile */}
             {user && (
@@ -1566,88 +1743,6 @@ export default function App() {
                       />
                       <div className="w-9 h-5 bg-slate-200 dark:bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-brand-orange"></div>
                     </label>
-                  </div>
-
-                  {/* Google Sheets Sync Controller */}
-                  <div className="border-t border-slate-200/50 dark:border-slate-800/50 pt-2.5 mt-2.5 space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block">
-                          Google Sheets Sync Status
-                        </span>
-                        <span className="text-[10px] text-slate-400 dark:text-slate-500 block">
-                          गुगल शीट मध्ये सिंक करा (Cloud Sync)
-                        </span>
-                      </div>
-                      {token ? (
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input 
-                            type="checkbox" 
-                            checked={!isOfflineMode} 
-                            onChange={(e) => {
-                              const turnOnSheets = e.target.checked;
-                              setIsOfflineMode(!turnOnSheets);
-                              localStorage.setItem("is_offline_mode", String(!turnOnSheets));
-                              fetchSheetEntries(!turnOnSheets, token, spreadsheetId);
-                              if (turnOnSheets) {
-                                showSuccess("Google Sheets Sync Active!");
-                              } else {
-                                showSuccess("Switched to Local Offline database.");
-                              }
-                            }} 
-                            className="sr-only peer" 
-                          />
-                          <div className="w-9 h-5 bg-slate-200 dark:bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-emerald-600"></div>
-                        </label>
-                      ) : (
-                        <span className="text-[10px] bg-slate-100 dark:bg-slate-900 text-slate-400 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-850 font-mono">
-                          Offline
-                        </span>
-                      )}
-                    </div>
-
-                    {!token ? (
-                      <button
-                        onClick={handleGoogleSignIn}
-                        disabled={isLoggingIn}
-                        className="w-full mt-1.5 py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-sm transition-all hover:scale-[1.01]"
-                      >
-                        <FileSpreadsheet className="h-4 w-4" />
-                        <span>{isLoggingIn ? "Connecting Google..." : "Connect Google Sheets Ledger"}</span>
-                      </button>
-                    ) : (
-                      <div className="bg-slate-100 dark:bg-slate-900 p-2 rounded-xl border border-slate-200 dark:border-slate-800 text-[10px] space-y-1 text-slate-500 dark:text-slate-400">
-                        <div className="flex justify-between">
-                          <span>User: {user?.email || "Connected"}</span>
-                          <button 
-                            onClick={handleLogoutGoogle}
-                            className="text-rose-500 hover:underline font-semibold"
-                          >
-                            Disconnect
-                          </button>
-                        </div>
-                        {spreadsheetId ? (
-                          <div className="flex justify-between items-center text-[9px] font-mono bg-white dark:bg-black p-1 px-1.5 rounded-lg border border-slate-150 dark:border-slate-850">
-                            <span className="truncate max-w-[160px]">Sheet ID: {spreadsheetId}</span>
-                            <button 
-                              onClick={() => ensureGoogleSheet(token)}
-                              disabled={isEnsuringSheet}
-                              className="text-emerald-500 hover:underline font-semibold shrink-0"
-                            >
-                              {isEnsuringSheet ? "Syncing..." : "Re-sync"}
-                            </button>
-                          </div>
-                        ) : (
-                          <button 
-                            onClick={() => ensureGoogleSheet(token)}
-                            disabled={isEnsuringSheet}
-                            className="w-full mt-1 py-1 px-2 bg-emerald-600/10 text-emerald-600 hover:bg-emerald-600/20 border border-emerald-600/25 rounded-lg font-semibold"
-                          >
-                            {isEnsuringSheet ? "Creating Sheet..." : "Create Spreadsheet"}
-                          </button>
-                        )}
-                      </div>
-                    )}
                   </div>
                 </div>
 
