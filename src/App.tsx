@@ -1206,8 +1206,35 @@ export default function App() {
         {/* Top Navbar */}
         <header className="flex flex-col sm:flex-row justify-between items-center gap-4 mb-8 pb-6 border-b border-slate-800/40">
           <div className="flex items-center gap-3">
-            <div className="p-3 bg-brand-orange text-white rounded-xl glow-orange">
-              <Database className="h-7 w-7" />
+            {/* Srivaishnava Tilak Namam Logo */}
+            <div className="flex-shrink-0 animate-fade-in" id="namam-logo-container">
+              <svg 
+                viewBox="0 0 200 300" 
+                fill="none" 
+                xmlns="http://www.w3.org/2000/svg" 
+                className="h-14 w-auto drop-shadow-[0_0_8px_rgba(179,27,27,0.3)] transition-transform hover:scale-105 duration-300"
+              >
+                {/* Top Dot */}
+                <circle cx="100" cy="15" r="9" fill="#b31b1b" />
+                
+                {/* Outer White U-Shape with Red Border */}
+                <path 
+                  d="M 28,70 L 76,70 V 195 C 76,225 86,234 100,234 C 114,234 124,225 124,195 V 70 L 172,70 L 158,242 C 158,252 148,244 142,242 C 125,275 75,275 58,242 C 52,244 42,252 42,242 Z" 
+                  fill="#ffffff" 
+                  stroke="#b31b1b" 
+                  strokeWidth="5" 
+                  strokeLinejoin="round" 
+                />
+                
+                {/* Central Red Tilak / Flame */}
+                <path 
+                  d="M 100,32 C 99,80 84,160 84,195 C 84,210 91,218 100,218 C 109,218 116,210 116,195 C 116,160 101,80 100,32 Z" 
+                  fill="#b31b1b" 
+                />
+                
+                {/* Bottom Dot */}
+                <circle cx="100" cy="285" r="9" fill="#b31b1b" />
+              </svg>
             </div>
             <div>
               <h1 className="text-2xl md:text-3xl font-display font-bold tracking-tight text-brand-orange flex items-center gap-2">

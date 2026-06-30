@@ -41,6 +41,30 @@ const getAuthToken = (req: express.Request): string | null => {
   return authHeader.substring(7);
 };
 
+// Helper: Get properties of the first worksheet dynamically to handle localization and renaming
+async function getFirstSheetProperties(spreadsheetId: string, token: string): Promise<{ sheetId: number; title: string }> {
+  const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties(sheetId,title)`;
+  const metaRes = await fetch(metaUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  if (!metaRes.ok) {
+    const errText = await metaRes.text();
+    throw new Error(`Failed to fetch spreadsheet metadata: ${errText}`);
+  }
+
+  const metaData: any = await metaRes.json();
+  const firstSheet = metaData.sheets?.[0]?.properties;
+  if (!firstSheet) {
+    throw new Error("No worksheets found in this spreadsheet.");
+  }
+
+  return {
+    sheetId: firstSheet.sheetId ?? 0,
+    title: firstSheet.title || "Sheet1",
+  };
+}
+
 // API: Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
@@ -352,7 +376,8 @@ app.post("/api/sheets/ensure-sheet", async (req, res) => {
       newlyCreated = true;
 
       // 3. Initialize with headers
-      const appendHeaderUrl = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`;
+      const props = await getFirstSheetProperties(file.id, token);
+      const appendHeaderUrl = `https://sheets.googleapis.com/v4/spreadsheets/${file.id}/values/${encodeURIComponent(props.title)}!A1:append?valueInputOption=USER_ENTERED`;
       const headerRes = await fetch(appendHeaderUrl, {
         method: "POST",
         headers: {
@@ -399,7 +424,8 @@ app.post("/api/sheets/append", async (req, res) => {
     const { date, name, amount, type, description } = transaction;
     const createdTime = new Date().toLocaleString();
 
-    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:append?valueInputOption=USER_ENTERED`;
+    const props = await getFirstSheetProperties(spreadsheetId, token);
+    const appendUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(props.title)}!A1:append?valueInputOption=USER_ENTERED`;
     const appendRes = await fetch(appendUrl, {
       method: "POST",
       headers: {
@@ -438,7 +464,8 @@ app.get("/api/sheets/list", async (req, res) => {
   }
 
   try {
-    const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:F500`;
+    const props = await getFirstSheetProperties(spreadsheetId as string, token);
+    const getUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(props.title)}!A1:F500`;
     const getRes = await fetch(getUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -486,20 +513,11 @@ app.post("/api/sheets/delete-last", async (req, res) => {
   }
 
   try {
-    // 1. Get current rows to find row count and find Sheet ID
-    const metaUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`;
-    const metaRes = await fetch(metaUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    // 1. Get current rows to find row count and find Sheet ID and Title dynamically
+    const props = await getFirstSheetProperties(spreadsheetId, token);
+    const sheetId = props.sheetId;
 
-    if (!metaRes.ok) {
-      throw new Error("Failed to fetch spreadsheet metadata");
-    }
-
-    const metaData: any = await metaRes.json();
-    const sheetId = metaData.sheets?.[0]?.properties?.sheetId ?? 0;
-
-    const dataUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/Sheet1!A1:F500`;
+    const dataUrl = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(props.title)}!A1:F500`;
     const dataRes = await fetch(dataUrl, {
       headers: { Authorization: `Bearer ${token}` },
     });
