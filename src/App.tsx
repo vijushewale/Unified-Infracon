@@ -1847,7 +1847,7 @@ export default function App() {
                 {isParsing && (
                   <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm flex flex-col items-center justify-center z-10">
                     <RefreshCw className="h-8 w-8 text-brand-orange animate-spin mb-2" />
-                    <span className="text-xs font-semibold text-white">Gemini Extracting Ledger Data...</span>
+                    <span className="text-xs font-semibold text-white">Vijay Ai Extracting Data...</span>
                   </div>
                 )}
               </div>
